@@ -1,6 +1,4 @@
-import { readFileSync, existsSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+export type Priority = "low" | "normal" | "high";
 
 export interface DesktopConfig {
   enabled: boolean;
@@ -34,13 +32,11 @@ export interface EmailConfig {
   enabled: boolean;
   to: string;
   from?: string;
-  // OAuth (Gmail) — populated by the config UI
   clientId?: string;
   clientSecret?: string;
   refreshToken?: string;
   accessToken?: string;
   connectedEmail?: string;
-  // SMTP fallback
   host?: string;
   port?: number;
   secure?: boolean;
@@ -51,7 +47,7 @@ export interface EmailConfig {
 export interface NtfyConfig {
   enabled: boolean;
   topic: string;
-  serverUrl?: string;  // display only — shown in UI for pasting into the ntfy app
+  serverUrl?: string;
 }
 
 export interface DiscordConfig {
@@ -70,7 +66,23 @@ export interface TeamsConfig {
   webhookUrl: string;
 }
 
-export interface Config {
+export interface DndConfig {
+  enabled: boolean;
+  schedule: {
+    enabled: boolean;
+    quietStart: string;
+    quietEnd: string;
+    days: number[];
+  };
+}
+
+export interface IdleConfig {
+  enabled: boolean;
+  thresholdSeconds: number;
+  alwaysDesktopWhenActive: boolean;
+}
+
+export interface AppConfig {
   desktop: DesktopConfig;
   telegram: TelegramConfig;
   whatsapp: WhatsAppConfig;
@@ -80,21 +92,25 @@ export interface Config {
   discord: DiscordConfig;
   slack: SlackConfig;
   teams: TeamsConfig;
+  dnd: DndConfig;
+  idle: IdleConfig;
 }
 
-const CONFIG_PATHS = [
-  join(process.cwd(), "config.json"),
-  join(homedir(), ".notify-mcp", "config.json"),
-];
+export interface InboxEntry {
+  text: string;
+  ts: string;
+  tag?: string;
+  messageId?: number;
+}
 
-export function loadConfig(): Config {
-  for (const path of CONFIG_PATHS) {
-    if (existsSync(path)) {
-      const raw = readFileSync(path, "utf-8");
-      return JSON.parse(raw) as Config;
-    }
-  }
-  throw new Error(
-    `No config.json found. Run: npm run ui  (then configure at http://localhost:3737)`
-  );
+export interface SessionMeta {
+  sessionId: string;
+  clientId: string;
+  tag?: string;
+  clientName?: string;
+  clientVersion?: string;
+  workspaceName?: string;
+  host?: string;
+  connectedAt: number;
+  lastSeen: number;
 }

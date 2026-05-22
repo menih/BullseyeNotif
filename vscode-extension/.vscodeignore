@@ -1,0 +1,5 @@
+.vscode/**
+.gitignore
+node_modules/**
+*.vsix
+# Keep screenshots/ in the .vsix (referenced by README.md)

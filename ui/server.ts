@@ -1,7 +1,8 @@
-import { randomUUID } from "crypto";
+#!/usr/bin/env node
+import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import express from "express";
 import { google } from "googleapis";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
 import { homedir, networkInterfaces } from "os";
 import { join } from "path";
 import { fileURLToPath } from "url";
@@ -10,9 +11,8 @@ import open from "open";
 import notifier from "node-notifier";
 import nodemailer from "nodemailer";
 import twilio from "twilio";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { z } from "zod";
+import { tmpdir } from "os";
+import { sendWithRouting } from "./messaging/notificationEngine.js";
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3737;
 const REDIRECT_URI = `http://localhost:${PORT}/auth/google/callback`;
@@ -22,15 +22,64 @@ const PUBLIC_DIR = join(fileURLToPath(new URL("../../ui/public", import.meta.url
 const CONFIG_DIR = join(homedir(), ".notify-mcp");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 const ADC_PATH = join(homedir(), ".config", "gcloud", "application_default_credentials.json");
+const AGENT_API_KEY = (process.env.NOTIFY_AGENT_KEY ?? "").trim();
+const SLACK_SIGNING_SECRET = (process.env.SLACK_SIGNING_SECRET ?? "").trim();
 
 function defaultConfig() {
   return {
-    desktop: { enabled: false },
+    desktop: { enabled: false, sound: true },
     telegram: { enabled: false, token: "", chatId: "" },
     whatsapp: { enabled: false, instanceId: "", apiToken: "", phone: "" },
     sms: { enabled: false, accountSid: "", authToken: "", from: "", to: "" },
     email: { enabled: false, to: "" },
+    ntfy: { enabled: false, topic: "", serverUrl: "" },
+    discord: { enabled: false, webhookUrl: "", username: "Claude Notify" },
+    slack: { enabled: false, webhookUrl: "" },
+    teams: { enabled: false, webhookUrl: "" },
+    dnd: {
+      enabled: false,      // manual toggle — when true, suppress all non-priority=high notifs
+      schedule: {          // scheduled DND windows — evaluated if dnd.enabled === false
+        enabled: false,
+        quietStart: "22:00", // HH:mm local time
+        quietEnd: "08:00",   // HH:mm local time (wraps past midnight if end < start)
+        days: [0, 1, 2, 3, 4, 5, 6], // 0=Sunday..6=Saturday
+      },
+    },
+    idle: {
+      enabled: true,         // when true, the server gates non-urgent notifs based on user activity
+      thresholdSeconds: 120, // <= this → user considered "active" → suppress remote channels
+      alwaysDesktopWhenActive: true, // when active+gated, still play desktop sound+banner so the user knows *something* happened (cheap local signal, doesn't blast the phone)
+    },
   };
+}
+
+/**
+ * Returns true if notifications should be suppressed right now based on DND config.
+ * priority=high always bypasses DND (handled by caller, not here).
+ */
+function isDndActive(cfg: Record<string, any>): boolean {
+  const dnd = cfg.dnd ?? {};
+  if (dnd.enabled === true) return true;          // manual toggle wins
+  const sched = dnd.schedule;
+  if (!sched || !sched.enabled) return false;
+
+  const now = new Date();
+  const day = now.getDay();
+  if (!Array.isArray(sched.days) || !sched.days.includes(day)) return false;
+
+  const [sH, sM] = String(sched.quietStart ?? "22:00").split(":").map((s: string) => parseInt(s, 10) || 0);
+  const [eH, eM] = String(sched.quietEnd ?? "08:00").split(":").map((s: string) => parseInt(s, 10) || 0);
+  const startMin = sH * 60 + sM;
+  const endMin = eH * 60 + eM;
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+
+  if (startMin === endMin) return false;
+  // Wrap past midnight: e.g. start=22:00, end=08:00 → "in quiet" if nowMin >= start OR nowMin < end
+  if (startMin < endMin) {
+    return nowMin >= startMin && nowMin < endMin;
+  } else {
+    return nowMin >= startMin || nowMin < endMin;
+  }
 }
 
 function loadConfig(): Record<string, any> {
@@ -54,6 +103,9 @@ function maskSecrets(config: Record<string, any>): Record<string, any> {
   if (c.sms?.authToken) c.sms.authToken = MASKED;
   if (c.telegram?.token) c.telegram.token = MASKED;
   if (c.whatsapp?.apiToken) c.whatsapp.apiToken = MASKED;
+  if (c.discord?.webhookUrl) c.discord.webhookUrl = MASKED;
+  if (c.slack?.webhookUrl) c.slack.webhookUrl = MASKED;
+  if (c.teams?.webhookUrl) c.teams.webhookUrl = MASKED;
   return c;
 }
 
@@ -62,8 +114,12 @@ function mergePreservingSecrets(
   update: Record<string, any>
 ): Record<string, any> {
   const merged: Record<string, any> = { ...defaultConfig(), ...existing };
-  for (const section of ["desktop", "telegram", "whatsapp", "sms", "email"] as const) {
+  for (const section of ["desktop", "telegram", "whatsapp", "sms", "email", "ntfy", "discord", "slack", "teams", "dnd", "idle"] as const) {
     merged[section] = { ...(merged[section] || {}), ...(update[section] || {}) };
+  }
+  // Nested schedule inside dnd
+  if (update.dnd?.schedule) {
+    merged.dnd.schedule = { ...(merged.dnd.schedule || {}), ...update.dnd.schedule };
   }
   const guard = (path: [string, string]) => {
     const [sec, field] = path;
@@ -78,12 +134,180 @@ function mergePreservingSecrets(
   guard(["sms", "authToken"]);
   guard(["telegram", "token"]);
   guard(["whatsapp", "apiToken"]);
+  guard(["discord", "webhookUrl"]);
+  guard(["slack", "webhookUrl"]);
+  guard(["teams", "webhookUrl"]);
   return merged;
 }
 
 const app = express();
-app.use(express.json());
+app.use((req, _res, next) => { console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} UA:${req.headers['user-agent']?.slice(0,60)}`); next(); });
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+  },
+}));
+app.use(express.urlencoded({
+  extended: true,
+  verify: (req, _res, buf) => {
+    const r = req as express.Request & { rawBody?: Buffer };
+    if (!r.rawBody) r.rawBody = Buffer.from(buf);
+  },
+}));
 app.use(express.static(PUBLIC_DIR));
+
+function requireAgentAuth(req: express.Request, res: express.Response): boolean {
+  if (!AGENT_API_KEY) return true;
+  const got = String(req.headers["x-notify-key"] ?? "").trim();
+  if (!got || got !== AGENT_API_KEY) {
+    res.status(401).json({ error: "unauthorized" });
+    return false;
+  }
+  return true;
+}
+
+function verifySlackSignature(req: express.Request): boolean {
+  if (!SLACK_SIGNING_SECRET) return true;
+  const sig = String(req.headers["x-slack-signature"] ?? "");
+  const ts = String(req.headers["x-slack-request-timestamp"] ?? "");
+  if (!sig || !ts) return false;
+  const tsNum = parseInt(ts, 10);
+  if (!Number.isFinite(tsNum)) return false;
+  if (Math.abs(Math.floor(Date.now() / 1000) - tsNum) > 300) return false;
+  const rawBody = ((req as express.Request & { rawBody?: Buffer }).rawBody ?? Buffer.from("{}")).toString("utf8");
+  const base = `v0:${ts}:${rawBody}`;
+  const expected = `v0=${createHmac("sha256", SLACK_SIGNING_SECRET).update(base).digest("hex")}`;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(sig, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+// ── Built-in ntfy server ──────────────────────────────────────────────────────
+// Implements the ntfy publish/subscribe protocol internally so the ntfy mobile
+// app can point directly at this server. No external service, fully private.
+
+interface NtfySubscriber {
+  res: import("express").Response;
+  topic: string;
+}
+
+const ntfySubscribers: Map<string, Set<NtfySubscriber>> = new Map();
+
+function ntfyFanout(topic: string, message: string, title: string, priority: number, tags: string): void {
+  const subs = ntfySubscribers.get(topic);
+  if (!subs || subs.size === 0) return;
+  const id = Date.now();
+  const event = [
+    `id: ${id}`,
+    `event: message`,
+    `data: ${JSON.stringify({ id: String(id), time: Math.floor(id / 1000), event: "message", topic, title, message, priority, tags: tags ? tags.split(",") : [] })}`,
+    "",
+    "",
+  ].join("\n");
+  for (const sub of subs) {
+    try { sub.res.write(event); } catch { subs.delete(sub); }
+  }
+}
+
+function handleNtfySse(req: import("express").Request, res: import("express").Response): void {
+  const topic = (req.params.topic as string);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  res.write(`: connected to omni-notify-mcp ntfy\n\n`);
+  const sub: NtfySubscriber = { res, topic };
+  if (!ntfySubscribers.has(topic)) ntfySubscribers.set(topic, new Set());
+  ntfySubscribers.get(topic)!.add(sub);
+  const keepalive = setInterval(() => { try { res.write(": keepalive\n\n"); } catch { clearInterval(keepalive); } }, 30_000);
+  req.on("close", () => { clearInterval(keepalive); ntfySubscribers.get(topic)?.delete(sub); });
+}
+
+function handleNtfyJson(req: import("express").Request, res: import("express").Response): void {
+  const topic = (req.params.topic as string);
+  res.setHeader("Content-Type", "application/x-ndjson");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  const sub: NtfySubscriber = { res, topic };
+  if (!ntfySubscribers.has(topic)) ntfySubscribers.set(topic, new Set());
+  ntfySubscribers.get(topic)!.add(sub);
+  const keepalive = setInterval(() => {
+    try { res.write(JSON.stringify({ event: "keepalive", time: Math.floor(Date.now() / 1000) }) + "\n"); }
+    catch { clearInterval(keepalive); }
+  }, 30_000);
+  req.on("close", () => { clearInterval(keepalive); ntfySubscribers.get(topic)?.delete(sub); });
+}
+
+// ntfy health + info endpoints — app checks these before subscribing
+app.get("/v1/health", (_req, res) => res.json({ healthy: true }));
+app.get("/v1/info", (_req, res) => res.json({ version: "2.11.0", sha: "n/a" }));
+
+// ntfy app hits /:topic/sse or /:topic/json (no /ntfy/ prefix)
+app.get("/:topic/sse",  (req, res) => {
+  if (["api", "auth", "mcp", "assets", "ntfy"].includes(req.params.topic)) { res.status(404).end(); return; }
+  handleNtfySse(req, res);
+});
+app.get("/:topic/json", (req, res) => {
+  if (["api", "auth", "mcp", "assets", "ntfy"].includes(req.params.topic)) { res.status(404).end(); return; }
+  handleNtfyJson(req, res);
+});
+
+// Also with /ntfy/ prefix for internal use
+app.get("/ntfy/:topic/sse",  (req, res) => handleNtfySse(req, res));
+app.get("/ntfy/:topic/json", (req, res) => handleNtfyJson(req, res));
+
+// Publish endpoint — ntfy protocol POST (with and without /ntfy/ prefix)
+app.put("/:topic", express.text({ type: "*/*" }), (req, res, next) => {
+  if (["api", "auth", "mcp", "assets", "ntfy"].includes(req.params.topic)) { next(); return; }
+  handleNtfyPublish(req, res);
+});
+app.post("/:topic", express.text({ type: "*/*" }), (req, res, next) => {
+  if (["api", "auth", "mcp", "assets", "ntfy"].includes(req.params.topic)) { next(); return; }
+  handleNtfyPublish(req, res);
+});
+app.get("/:topic/subscribers", (req, res) => {
+  if (["api", "auth", "mcp", "assets", "ntfy"].includes(req.params.topic)) { res.status(404).end(); return; }
+  const count = ntfySubscribers.get(req.params.topic)?.size ?? 0;
+  res.json({ topic: req.params.topic, subscribers: count });
+});
+
+function handleNtfyPublish(req: import("express").Request, res: import("express").Response): void {
+  const topic = req.params.topic as string;
+  const message = typeof req.body === "string" ? req.body : "";
+  const title = decodeURIComponent((req.headers["title"] || req.headers["x-title"] || "Claude Notify") as string);
+  const priority = parseInt((req.headers["priority"] || req.headers["x-priority"] || "3") as string) || 3;
+  const tags = (req.headers["tags"] || req.headers["x-tags"] || "") as string;
+  ntfyFanout(topic, message, title, priority, tags);
+  res.json({ id: String(Date.now()), time: Math.floor(Date.now() / 1000), event: "message", topic, title, message, priority });
+}
+
+app.put("/ntfy/:topic", express.text({ type: "*/*" }), (req, res) => {
+  const { topic } = req.params;
+  const message = typeof req.body === "string" ? req.body : "";
+  const title = decodeURIComponent(req.headers["title"] as string || req.headers["x-title"] as string || "Claude Notify");
+  const priority = parseInt((req.headers["priority"] || req.headers["x-priority"] || "3") as string) || 3;
+  const tags = ((req.headers["tags"] || req.headers["x-tags"] || "") as string);
+  ntfyFanout(topic, message, title, priority, tags);
+  res.json({ id: String(Date.now()), time: Math.floor(Date.now() / 1000), event: "message", topic, title, message, priority });
+});
+app.post("/ntfy/:topic", express.text({ type: "*/*" }), (req, res) => {
+  const { topic } = req.params;
+  const message = typeof req.body === "string" ? req.body : "";
+  const title = decodeURIComponent(req.headers["title"] as string || req.headers["x-title"] as string || "Claude Notify");
+  const priority = parseInt((req.headers["priority"] || req.headers["x-priority"] || "3") as string) || 3;
+  const tags = ((req.headers["tags"] || req.headers["x-tags"] || "") as string);
+  ntfyFanout(topic, message, title, priority, tags);
+  res.json({ id: String(Date.now()), time: Math.floor(Date.now() / 1000), event: "message", topic, title, message, priority });
+});
+
+// Subscriber count endpoint (for badge)
+app.get("/ntfy/:topic/subscribers", (req, res) => {
+  const count = ntfySubscribers.get(req.params.topic)?.size ?? 0;
+  res.json({ topic: req.params.topic, subscribers: count });
+});
 
 // ── Config API ────────────────────────────────────────────────────────────────
 
@@ -103,10 +327,103 @@ app.post("/api/config", (req, res) => {
 
 // ── Test routes ───────────────────────────────────────────────────────────────
 
+// Sound-only test — fires a system sound regardless of the saved 'sound'
+// toggle, so the user can preview the chime. On Windows, SnoreToast's
+// notification-sound is often muted per-app by Windows, so we ALSO trigger
+// a PowerShell console beep as a guaranteed-audible fallback. On mac/Linux
+// node-notifier's `sound: true` works reliably, no fallback needed.
+app.post("/api/test/sound", (_req, res) => {
+  if (process.platform === "win32") {
+    // Use System.Media.SystemSounds.Asterisk — plays through the sound card
+    // (Windows notification sound), works on every machine. console::beep
+    // uses the PC speaker which modern hardware lacks.
+    spawn("powershell", [
+      "-NoProfile",
+      "-Command",
+      "Add-Type -AssemblyName System.Windows.Forms; [System.Media.SystemSounds]::Asterisk.Play(); Start-Sleep -Milliseconds 600",
+    ], { windowsHide: true, stdio: "ignore" });
+    res.json({ ok: true, message: "Sound played (System.Media)" });
+    return;
+  }
+  notifier.notify(
+    { title: "Claude Notify", message: "Sound test", sound: true, wait: false },
+    (err) => {
+      if (err) res.status(500).json({ error: String(err) });
+      else res.json({ ok: true, message: "System sound triggered" });
+    }
+  );
+});
+
+async function speakText(text: string, voice: string): Promise<void> {
+  const mod: any = await import("msedge-tts");
+  const { MsEdgeTTS, OUTPUT_FORMAT } = mod;
+  const tts = new MsEdgeTTS();
+  await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+  const { mkdtempSync } = await import("fs");
+  const outDir = mkdtempSync(join(tmpdir(), "notify-tts-"));
+  const { audioFilePath } = await tts.toFile(outDir, text);
+  if (process.platform === "win32") {
+    spawn("powershell", [
+      "-NoProfile", "-Command",
+      `Add-Type -AssemblyName presentationCore; $p = New-Object System.Windows.Media.MediaPlayer; $done = $false; Register-ObjectEvent $p MediaEnded -Action { $script:done = $true } | Out-Null; $p.Open([uri]'${audioFilePath.replace(/\\/g, "\\\\")}'); $p.Play(); while (-not $done) { Start-Sleep -Milliseconds 200 }`,
+    ], { windowsHide: true, stdio: "ignore" });
+  } else if (process.platform === "darwin") {
+    spawn("afplay", [audioFilePath], { stdio: "ignore" });
+  } else {
+    spawn("aplay", [audioFilePath], { stdio: "ignore" });
+  }
+}
+
+app.post("/api/test/tts", async (req, res) => {
+  try {
+    const cfg = loadConfig();
+    const voice =
+      (typeof req.body?.voice === "string" && req.body.voice) ||
+      cfg.desktop?.ttsVoice ||
+      "en-US-AndrewMultilingualNeural";
+    await speakText("Notification from Claude. This is a voice test.", voice);
+    res.json({ ok: true, message: `TTS played (${voice})` });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+let voiceCache: { ts: number; voices: any[] } | null = null;
+app.get("/api/voices", async (_req, res) => {
+  try {
+    if (!voiceCache || Date.now() - voiceCache.ts > 24 * 60 * 60 * 1000) {
+      const mod: any = await import("msedge-tts");
+      const tts = new mod.MsEdgeTTS();
+      const all = await tts.getVoices();
+      voiceCache = {
+        ts: Date.now(),
+        voices: all
+          .filter((v: any) => v.Locale.startsWith("en-") && v.ShortName.includes("Neural"))
+          .map((v: any) => ({ shortName: v.ShortName, gender: v.Gender, locale: v.Locale })),
+      };
+    }
+    res.json({ voices: voiceCache.voices });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 app.post("/api/test/desktop", (_req, res) => {
   const time = new Date().toLocaleTimeString();
+  const cfg = loadConfig();
+  const wantSound = cfg.desktop?.sound !== false;
+  if (wantSound && process.platform === "win32") {
+    spawn("powershell", [
+      "-NoProfile", "-Command",
+      "Add-Type -AssemblyName System.Windows.Forms; [System.Media.SystemSounds]::Asterisk.Play(); Start-Sleep -Milliseconds 600",
+    ], { windowsHide: true, stdio: "ignore" });
+  }
   notifier.notify(
-    { title: "Claude Notify", message: `Desktop is working! (${time})`, sound: true },
+    {
+      title: "Claude Notify",
+      message: `Desktop is working! (${time})`,
+      sound: wantSound && process.platform !== "win32",
+    },
     (err) => {
       if (err) res.status(500).json({ error: String(err) });
       else res.json({ ok: true, message: "Desktop notification sent!" });
@@ -235,6 +552,52 @@ app.post("/api/test/email", async (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+});
+
+app.post("/api/test/ntfy", async (_req, res) => {
+  const cfg = loadConfig();
+  const ntfy = cfg.ntfy ?? {};
+  if (!ntfy.topic) { res.status(400).json({ error: "Topic is required." }); return; }
+  try {
+    const subs = ntfySubscribers.get(ntfy.topic)?.size ?? 0;
+    if (subs === 0) { res.status(400).json({ error: `No subscribers on topic '${ntfy.topic}'. Open the ntfy app and subscribe to this topic first.` }); return; }
+    ntfyFanout(ntfy.topic, "Test from Claude Notify - ntfy is working!", "Claude Notify - test", 3, "white_check_mark");
+    res.json({ ok: true, message: `ntfy notification sent to ${subs} subscriber(s) on topic '${ntfy.topic}'` });
+  } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+
+app.post("/api/test/discord", async (_req, res) => {
+  const cfg = loadConfig();
+  const dc = cfg.discord ?? {};
+  if (!dc.webhookUrl) { res.status(400).json({ error: "Webhook URL is required." }); return; }
+  try {
+    const r = await fetch(dc.webhookUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: dc.username ?? "Claude Notify", embeds: [{ title: "Claude Notify — test", description: "Test from Claude Notify — Discord is working!", color: 0x7c6dfa, timestamp: new Date().toISOString() }] }) });
+    if (!r.ok) throw new Error(`Discord ${r.status}: ${await r.text()}`);
+    res.json({ ok: true, message: "Discord message sent!" });
+  } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+app.post("/api/test/slack", async (_req, res) => {
+  const cfg = loadConfig();
+  const sl = cfg.slack ?? {};
+  if (!sl.webhookUrl) { res.status(400).json({ error: "Webhook URL is required." }); return; }
+  try {
+    const r = await fetch(sl.webhookUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "🔔 *Claude Notify — test*\nTest from Claude Notify — Slack is working!" }) });
+    if (!r.ok) throw new Error(`Slack ${r.status}: ${await r.text()}`);
+    res.json({ ok: true, message: "Slack message sent!" });
+  } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+app.post("/api/test/teams", async (_req, res) => {
+  const cfg = loadConfig();
+  const tm = cfg.teams ?? {};
+  if (!tm.webhookUrl) { res.status(400).json({ error: "Webhook URL is required." }); return; }
+  try {
+    const r = await fetch(tm.webhookUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "message", attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", contentUrl: null, content: { $schema: "http://adaptivecards.io/schemas/adaptive-card.json", type: "AdaptiveCard", version: "1.2", body: [{ type: "TextBlock", size: "Medium", weight: "Bolder", text: "Claude Notify — test" }, { type: "TextBlock", text: "Test from Claude Notify — Teams is working!", wrap: true }] } }] }) });
+    if (!r.ok) throw new Error(`Teams ${r.status}: ${await r.text()}`);
+    res.json({ ok: true, message: "Teams message sent!" });
+  } catch (err) { res.status(500).json({ error: String(err) }); }
 });
 
 // ── Google ADC auto-setup ─────────────────────────────────────────────────────
@@ -441,6 +804,22 @@ function log(direction: "→" | "←" | "·", channel: string, text: string, cli
   }
 }
 
+app.get("/api/sessions", (_req, res) => {
+  const now = Date.now();
+  const list = [...inboxStreamClients].map((c, i) => ({
+    clientId: `sse-${i + 1}`,
+    tag: c.tag,
+    transport: "sse",
+    connectedAt: now,
+    lastSeen: now,
+  }));
+  res.json({ sessions: list });
+});
+
+app.delete("/api/sessions/:clientId", (_req, res) => {
+  res.status(410).json({ error: "session_disconnect_unsupported", message: "HTTP mode does not support remote disconnect." });
+});
+
 app.get("/api/logs", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -456,75 +835,225 @@ app.get("/api/logs", (req, res) => {
 
 async function sendNotification(message: string, priority: "low" | "normal" | "high", client?: string) {
   const cfg = loadConfig();
-  const results: string[] = [];
-  const errors: string[] = [];
+  const inTelegramConvo = Date.now() - lastTelegramInboundAt < TELEGRAM_CONVO_TTL_MS;
+  const idleSecs = getOsIdleSeconds();
 
-  const send = async (name: string, fn: () => Promise<void>) => {
-    try {
-      await fn();
-      results.push(name);
-      log("→", name, message, client);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      errors.push(`${name}: ${msg}`);
-      log("→", name, `ERROR: ${msg}`, client);
-    }
-  };
-
-  if (priority !== "low") {
-    if (cfg.desktop?.enabled) {
-      await send("desktop", () => new Promise<void>((res, rej) =>
-        notifier.notify({ title: "Claude Notify", message, sound: true },
-          (err) => err ? rej(err) : res())));
-    }
-    if (cfg.telegram?.enabled && cfg.telegram.token && cfg.telegram.chatId) {
-      await send("telegram", async () => {
+  const result = await sendWithRouting({
+    message,
+    priority,
+    policy: {
+      idleEnabled: cfg.idle?.enabled !== false,
+      idleThresholdSeconds: cfg.idle?.thresholdSeconds ?? 120,
+      alwaysDesktopWhenActive: cfg.idle?.alwaysDesktopWhenActive !== false,
+      dndActive: isDndActive(cfg),
+    },
+    ctx: {
+      inTelegramConversation: inTelegramConvo,
+      uiActive: isUiActivelyOpen(),
+      idleSeconds: idleSecs,
+    },
+    enableDesktop: !!cfg.desktop?.enabled,
+    enableTelegram: !!(cfg.telegram?.enabled && cfg.telegram.token && cfg.telegram.chatId),
+    enableEmail: !!(cfg.email?.enabled && cfg.email.to),
+    enableSms: !!(cfg.sms?.enabled && cfg.sms.accountSid && cfg.sms.authToken && cfg.sms.from && cfg.sms.to),
+    enableNtfy: !!(cfg.ntfy?.enabled && cfg.ntfy.topic),
+    enableDiscord: !!(cfg.discord?.enabled && cfg.discord.webhookUrl),
+    enableSlack: !!(cfg.slack?.enabled && cfg.slack.webhookUrl),
+    enableTeams: !!(cfg.teams?.enabled && cfg.teams.webhookUrl),
+    senders: {
+      desktop: async () => {
+        const wantSound = cfg.desktop?.sound !== false;
+        if (wantSound && process.platform === "win32") {
+          spawn("powershell", [
+            "-NoProfile", "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms; [System.Media.SystemSounds]::Asterisk.Play(); Start-Sleep -Milliseconds 600",
+          ], { windowsHide: true, stdio: "ignore" });
+        }
+        const soundOpt = wantSound && process.platform !== "win32";
+        if (cfg.desktop?.tts) {
+          const voice = cfg.desktop?.ttsVoice ?? "en-US-AndrewMultilingualNeural";
+          speakText(message, voice).catch((err) =>
+            log("→", "tts", `ERROR: ${err instanceof Error ? err.message : String(err)}`, client));
+        }
+        await new Promise<void>((resolve, reject) => {
+          notifier.notify({ title: "Claude Notify", message, sound: soundOpt }, (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+      },
+      telegram: async () => {
         const body: Record<string, any> = { chat_id: cfg.telegram.chatId, text: message };
         if (lastUserMessageId) body.reply_to_message_id = lastUserMessageId;
         const r = await fetch(`https://api.telegram.org/bot${cfg.telegram.token}/sendMessage`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
         if (!r.ok) throw new Error(await r.text());
-      });
-    }
+      },
+      sms: async () => {
+        const smsClient = twilio(cfg.sms.accountSid, cfg.sms.authToken);
+        await smsClient.messages.create({ body: message, from: cfg.sms.from, to: cfg.sms.to });
+      },
+      email: async () => {
+        const email = cfg.email;
+        let transport;
+        if (email.refreshToken && email.clientId && email.clientSecret) {
+          transport = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+              type: "OAuth2",
+              user: email.connectedEmail ?? email.to,
+              clientId: email.clientId,
+              clientSecret: email.clientSecret,
+              refreshToken: email.refreshToken,
+              accessToken: email.accessToken,
+            },
+          });
+        } else if (email.host && email.user && email.pass) {
+          transport = nodemailer.createTransport({
+            host: email.host,
+            port: email.port ?? 587,
+            secure: email.secure ?? false,
+            auth: { user: email.user, pass: email.pass },
+          });
+        } else {
+          return;
+        }
+        await transport.sendMail({
+          from: email.connectedEmail ?? email.user ?? email.to,
+          to: email.to,
+          subject: "Claude Notify",
+          text: message,
+        });
+      },
+      ntfy: async (_text, prio) => {
+        const priorityMap: Record<string, number> = { low: 2, normal: 3, high: 5 };
+        const tags = prio === "high" ? "rotating_light" : "bell";
+        const subs = ntfySubscribers.get(cfg.ntfy.topic)?.size ?? 0;
+        if (subs === 0) throw new Error(`ntfy: no subscribers on topic '${cfg.ntfy.topic}'`);
+        ntfyFanout(cfg.ntfy.topic, message, "Claude Notify", priorityMap[prio] ?? 3, tags);
+      },
+      discord: async (_text, prio) => {
+        const colorMap: Record<string, number> = { low: 0x6b7280, normal: 0x7c6dfa, high: 0xef4444 };
+        const r = await fetch(cfg.discord.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: cfg.discord.username ?? "Claude Notify",
+            embeds: [{
+              title: "Claude Notify",
+              description: message,
+              color: colorMap[prio] ?? colorMap.normal,
+              timestamp: new Date().toISOString(),
+            }],
+          }),
+        });
+        if (!r.ok) throw new Error(`Discord ${r.status}: ${await r.text()}`);
+      },
+      slack: async (_text, prio) => {
+        const emojiMap: Record<string, string> = { low: "ℹ️", normal: "🔔", high: "🚨" };
+        const emoji = emojiMap[prio] ?? emojiMap.normal;
+        const r = await fetch(cfg.slack.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: `${emoji} *Claude Notify*`,
+            blocks: [
+              { type: "section", text: { type: "mrkdwn", text: `${emoji} *Claude Notify*\n${message}` } },
+              { type: "context", elements: [{ type: "mrkdwn", text: `Priority: ${prio}` }] },
+            ],
+          }),
+        });
+        if (!r.ok) throw new Error(`Slack ${r.status}: ${await r.text()}`);
+      },
+      teams: async (_text, prio) => {
+        const colorMap: Record<string, string> = { low: "Default", normal: "Accent", high: "Attention" };
+        const r = await fetch(cfg.teams.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "message",
+            attachments: [{
+              contentType: "application/vnd.microsoft.card.adaptive",
+              contentUrl: null,
+              content: {
+                $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+                type: "AdaptiveCard",
+                version: "1.2",
+                body: [
+                  { type: "TextBlock", size: "Medium", weight: "Bolder", text: "Claude Notify", color: colorMap[prio] ?? "Default" },
+                  { type: "TextBlock", text: message, wrap: true },
+                  { type: "TextBlock", text: `Priority: ${prio}`, isSubtle: true, size: "Small" },
+                ],
+              },
+            }],
+          }),
+        });
+        if (!r.ok) throw new Error(`Teams ${r.status}: ${await r.text()}`);
+      },
+    },
+  });
+
+  if (result.suppressedReason) {
+    log("·", "notify", `suppressed (${result.suppressedReason})`, client);
+    return result.suppressedReason;
   }
 
-  if (priority === "high") {
-    const sms = cfg.sms ?? {};
-    if (sms.enabled && sms.accountSid && sms.authToken && sms.from && sms.to) {
-      await send("sms", async () => {
-        const client = twilio(sms.accountSid, sms.authToken);
-        await client.messages.create({ body: message, from: sms.from, to: sms.to });
-      });
-    }
+  for (const delivered of result.delivered) {
+    log("→", delivered, message, client);
   }
-
-  const email = cfg.email ?? {};
-  if (email.enabled && email.to) {
-    await send("email", async () => {
-      let transport;
-      if (email.refreshToken && email.clientId && email.clientSecret) {
-        transport = nodemailer.createTransport({
-          service: "gmail", auth: { type: "OAuth2", user: email.connectedEmail ?? email.to,
-            clientId: email.clientId, clientSecret: email.clientSecret,
-            refreshToken: email.refreshToken, accessToken: email.accessToken },
-        });
-      } else if (email.host && email.user && email.pass) {
-        transport = nodemailer.createTransport({
-          host: email.host, port: email.port ?? 587, secure: email.secure ?? false,
-          auth: { user: email.user, pass: email.pass },
-        });
-      } else return;
-      await transport.sendMail({ from: email.connectedEmail ?? email.user ?? email.to,
-        to: email.to, subject: "Claude Notify", text: message });
-    });
+  for (const err of result.errors) {
+    log("→", "notify", `ERROR: ${err}`, client);
   }
 
   return [
-    results.length ? `Sent via: ${results.join(", ")}` : null,
-    errors.length ? `Errors: ${errors.join("; ")}` : null,
+    result.delivered.length ? `Sent via: ${result.delivered.join(", ")}` : null,
+    result.errors.length ? `Errors: ${result.errors.join("; ")}` : null,
   ].filter(Boolean).join(" | ") || "No channels delivered";
+}
+
+// ── OS idle-time (cross-platform) ─────────────────────────────────────────────
+// Returns seconds since last keyboard/mouse input. -1 on error/unsupported.
+// Clients call the `get_idle_seconds` tool and decide whether to fire a notif.
+
+const IDLE_SCRIPT_PS1 = join(fileURLToPath(new URL("../../scripts/idle-check.ps1", import.meta.url)));
+
+function getOsIdleSeconds(): number {
+  try {
+    if (process.platform === "win32") {
+      // PowerShell + Win32 GetLastInputInfo via bundled script
+      const r = spawnSync("powershell", ["-NoProfile", "-File", IDLE_SCRIPT_PS1], {
+        encoding: "utf-8", windowsHide: true,
+      });
+      if (r.status === 0) {
+        const n = parseInt((r.stdout || "").trim(), 10);
+        return Number.isFinite(n) ? n : -1;
+      }
+      return -1;
+    }
+    if (process.platform === "darwin") {
+      // macOS: ioreg exposes HIDIdleTime in nanoseconds
+      const r = spawnSync("sh", ["-c",
+        "ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print int($NF/1000000000); exit}'"],
+        { encoding: "utf-8" });
+      if (r.status === 0) {
+        const n = parseInt((r.stdout || "").trim(), 10);
+        return Number.isFinite(n) ? n : -1;
+      }
+      return -1;
+    }
+    // Linux: xprintidle (if installed) returns ms
+    const r = spawnSync("xprintidle", [], { encoding: "utf-8" });
+    if (r.status === 0) {
+      const ms = parseInt((r.stdout || "").trim(), 10);
+      return Number.isFinite(ms) ? Math.floor(ms / 1000) : -1;
+    }
+    return -1;
+  } catch {
+    return -1;
+  }
 }
 
 function getLocalIp() {
@@ -542,8 +1071,61 @@ interface InboxEntry { text: string; ts: string; messageId?: number; tag?: strin
 
 const pendingAsks = new Map<string, { resolve: (v: string) => void; timer: NodeJS.Timeout; tag?: string }>();
 const inboxQueue: InboxEntry[] = [];
+
+// Long-poll waiters for `wait_for_inbox`. Keyed by token; filtered by tag the
+// same way as `drainInboxFor`. When a new inbox entry arrives, resolve all
+// matching waiters immediately with that entry — they get the message as a
+// tool *result*, which every MCP client surfaces reliably (unlike server
+// notifications, which Claude Code and others frequently drop).
+interface InboxWaiter {
+  resolve: (entries: InboxEntry[]) => void;
+  timer: NodeJS.Timeout;
+  tag?: string;
+}
+const inboxWaiters = new Map<string, InboxWaiter>();
+
+// Match waiters the same way `matchesSession` matches SSE subscribers:
+// - untagged entry → every waiter is a match (broadcast)
+// - tagged entry   → only waiters with the same tag match
+function takeWaitersFor(entryTag: string | undefined): InboxWaiter[] {
+  const taken: InboxWaiter[] = [];
+  for (const [id, w] of inboxWaiters) {
+    const match = entryTag === undefined ? true : w.tag === entryTag;
+    if (match) {
+      inboxWaiters.delete(id);
+      taken.push(w);
+    }
+  }
+  return taken;
+}
 let tgPollOffset = -1;
 let lastUserMessageId: number | undefined;
+// When the user pings us from Telegram, bypass idle-gating on outbound
+// notifs for a while — clearly they want a Telegram reply back, so we
+// shouldn't gate remote channels just because they're at the keyboard
+// typing. TTL is short so normal idle-gating resumes once the conversation
+// goes quiet.
+let lastTelegramInboundAt = 0;
+const TELEGRAM_CONVO_TTL_MS = 5 * 60 * 1000;
+
+// Page visibility: the web UI reports when it becomes visible/hidden so the
+// server can skip external channels while the user is actively watching the UI.
+let uiVisibleAt = 0;   // last time UI reported visible
+let uiHiddenAt  = 0;   // last time UI reported hidden (0 = never seen)
+const UI_VISIBLE_TTL_MS = 30_000; // if no heartbeat for 30s, treat as unknown
+
+app.post("/api/ui/visibility", (req, res) => {
+  const { visible } = req.body ?? {};
+  if (visible) { uiVisibleAt = Date.now(); }
+  else         { uiHiddenAt  = Date.now(); }
+  res.json({ ok: true });
+});
+
+function isUiActivelyOpen(): boolean {
+  if (uiVisibleAt === 0) return false;  // never reported
+  if (uiHiddenAt > uiVisibleAt) return false;  // last report was hidden
+  return Date.now() - uiVisibleAt < UI_VISIBLE_TTL_MS;
+}
 
 // Session tagging: a session may declare a tag (e.g. "alphawave") when it
 // connects to /mcp?tag=alphawave. Telegram messages starting with "@<tag>"
@@ -562,22 +1144,112 @@ function matchesSession(entry: InboxEntry, sessionTag: string | undefined): bool
   return entry.tag === sessionTag;        // tagged   → only matching session
 }
 
+// ── /btw file-drop bridge ─────────────────────────────────────────────────────
+// Claude Code has no API for injecting a prompt into a running session while a
+// tool call is executing (anthropics/claude-code#27441, still open). The only
+// in-band channel is the `FileChanged` hook: when a watched file changes on
+// disk, Claude Code's hook script stdout is injected as additional context on
+// the next turn — without the agent having to poll.
+//
+// We drop every unsolicited user message into ~/.notify-mcp/inbox/<ts>.md, and
+// ship a one-liner hook in the README that globs that directory. This is the
+// closest thing to a "/btw" we can get until the client exposes a real inject
+// endpoint.
+const INBOX_DROP_DIR = join(CONFIG_DIR, "inbox");
+const INBOX_DROP_TTL_MS = 24 * 60 * 60 * 1000; // 24h — hook should have consumed within seconds
+
+function writeInboxDrop(entry: InboxEntry): void {
+  try {
+    if (!existsSync(INBOX_DROP_DIR)) mkdirSync(INBOX_DROP_DIR, { recursive: true });
+    const safeTs = entry.ts.replace(/[:.]/g, "-");
+    const tagPart = entry.tag ? `.${entry.tag}` : "";
+    const path = join(INBOX_DROP_DIR, `${safeTs}${tagPart}.md`);
+    const header = `# Unsolicited user message\n\n` +
+      `- Time: ${entry.ts}\n` +
+      (entry.tag ? `- Tag: @${entry.tag}\n` : "") +
+      `- Origin: user (out-of-band)\n\n`;
+    writeFileSync(path, header + entry.text + "\n");
+  } catch (err) {
+    log("·", "inbox-drop", `write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// Reap old drops so the directory doesn't grow forever. Hooks consume within
+// seconds, so anything older than a day is a message the agent never saw —
+// keep it for forensics but eventually clean up.
+setInterval(() => {
+  try {
+    if (!existsSync(INBOX_DROP_DIR)) return;
+    const now = Date.now();
+    const files = readdirSync(INBOX_DROP_DIR);
+    for (const f of files) {
+      const p = join(INBOX_DROP_DIR, f);
+      try {
+        const st = statSync(p);
+        if (now - st.mtimeMs > INBOX_DROP_TTL_MS) unlinkSync(p);
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}, 60 * 60 * 1000);
+
 // SSE stream of new inbox messages (server-push). Each connection may filter
 // by tag: /api/inbox/stream?tag=alphawave. Filtering rule mirrors poll/notify:
 // untagged messages always delivered; tagged messages only when tags match.
 interface SseClient { res: express.Response; tag?: string }
 const inboxStreamClients = new Set<SseClient>();
 
-function broadcastInbox(entry: InboxEntry) {
+function broadcastInbox(entry: InboxEntry): number {
   const payload = JSON.stringify(entry);
+  let delivered = 0;
   for (const c of inboxStreamClients) {
+    // Proactively drop subscribers whose socket is gone. Node's req.on("close")
+    // isn't reliable on every disconnect path (e.g. VS Code window killed hard,
+    // laptop lid shut), so check writability before every write.
+    if (c.res.destroyed || c.res.writableEnded || !c.res.writable) {
+      inboxStreamClients.delete(c);
+      continue;
+    }
     if (!matchesSession(entry, c.tag)) continue;
     try {
       c.res.write(`data: ${payload}\n\n`);
+      delivered++;
     } catch {
-      // drop on failure; the close handler will remove the client
+      inboxStreamClients.delete(c);
     }
   }
+  return delivered;
+}
+
+function ingestInboxEntry(entry: InboxEntry, source: string): { waiters: number; sse: number } {
+  const waiters = takeWaitersFor(entry.tag);
+  if (waiters.length > 0) {
+    for (const w of waiters) {
+      clearTimeout(w.timer);
+      w.resolve([entry]);
+    }
+  } else {
+    inboxQueue.push(entry);
+  }
+  const sse = broadcastInbox(entry);
+  writeInboxDrop(entry);
+  log("·", "inbox", `${source}: ${entry.text} (sse=${sse}, waiters=${waiters.length})`, entry.tag);
+  return { waiters: waiters.length, sse };
+}
+
+// Test-only: inject a fake inbox entry exactly as the Telegram listener would.
+// Gated behind NOTIFY_MCP_TEST_ENDPOINTS=1 so it's never exposed in a normal
+// production run. Used by the test suite to drive wait_for_inbox wake-up and
+// SSE broadcast paths without needing a real Telegram bot.
+if (process.env.NOTIFY_MCP_TEST_ENDPOINTS === "1") {
+  app.post("/__test__/inject-inbox", express.json(), (req, res) => {
+    const text = String(req.body?.text ?? "");
+    const tag = req.body?.tag ? String(req.body.tag).toLowerCase() : undefined;
+    if (!text) { res.status(400).json({ error: "text required" }); return; }
+    const entry: InboxEntry = { text, ts: new Date().toISOString(), tag };
+    const out = ingestInboxEntry(entry, "test-inject");
+    res.json({ injected: true, waiters: out.waiters, sse: out.sse });
+  });
+  log("·", "test", "NOTIFY_MCP_TEST_ENDPOINTS=1 — /__test__/inject-inbox enabled");
 }
 
 app.get("/api/inbox/stream", (req, res) => {
@@ -601,11 +1273,178 @@ app.get("/api/inbox/stream", (req, res) => {
   });
 });
 
+// ── Non-MCP automation API ───────────────────────────────────────────────────
+// These endpoints let an agent script use plain HTTP (no MCP transport) for
+// notify + unsolicited inbox handling.
+
+app.post("/api/agent/notify", async (req, res) => {
+  if (!requireAgentAuth(req, res)) return;
+  const message = String(req.body?.message ?? "").trim();
+  const priority = (String(req.body?.priority ?? "normal") as "low" | "normal" | "high");
+  if (!message) { res.status(400).json({ error: "message required" }); return; }
+  if (!["low", "normal", "high"].includes(priority)) { res.status(400).json({ error: "invalid priority" }); return; }
+  try {
+    const out = await sendNotification(message, priority, "agent-http");
+    res.json({ ok: true, result: out });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/agent/inbox/poll", (req, res) => {
+  if (!requireAgentAuth(req, res)) return;
+  const tag = typeof req.query.tag === "string" ? req.query.tag.toLowerCase() : undefined;
+  const messages = drainInboxFor(tag);
+  res.json({ ok: true, messages });
+});
+
+app.get("/api/agent/inbox/wait", async (req, res) => {
+  if (!requireAgentAuth(req, res)) return;
+  const tag = typeof req.query.tag === "string" ? req.query.tag.toLowerCase() : undefined;
+  const timeoutSecondsRaw = parseInt(String(req.query.timeout_seconds ?? "50"), 10);
+  const timeoutSeconds = Number.isFinite(timeoutSecondsRaw) ? Math.max(5, Math.min(55, timeoutSecondsRaw)) : 50;
+
+  const queued = drainInboxFor(tag);
+  if (queued.length > 0) {
+    res.json({ ok: true, messages: queued, empty: false });
+    return;
+  }
+
+  const token = randomUUID();
+  const entries = await new Promise<InboxEntry[]>((resolve) => {
+    const timer = setTimeout(() => {
+      inboxWaiters.delete(token);
+      resolve([]);
+    }, timeoutSeconds * 1000);
+    inboxWaiters.set(token, { resolve, timer, tag });
+  });
+  res.json({ ok: true, messages: entries, empty: entries.length === 0 });
+});
+
+app.post("/api/agent/inbox/inject", (req, res) => {
+  if (!requireAgentAuth(req, res)) return;
+  const text = String(req.body?.text ?? "").trim();
+  if (!text) { res.status(400).json({ error: "text required" }); return; }
+  const tag = req.body?.tag ? String(req.body.tag).toLowerCase() : undefined;
+  const entry: InboxEntry = { text, ts: new Date().toISOString(), tag };
+  const out = ingestInboxEntry(entry, "agent-inject");
+  res.json({ ok: true, waiters: out.waiters, sse: out.sse });
+});
+
+// Slack Events API (inbound). Requires configuring your Slack app with an
+// Event Request URL: POST /api/slack/events.
+app.post("/api/slack/events", (req, res) => {
+  let body: any = req.body ?? {};
+  if (body?.payload && typeof body.payload === "string") {
+    try {
+      body = JSON.parse(body.payload);
+    } catch {
+      // keep original body if payload isn't valid JSON
+    }
+  }
+  if ((!body || Object.keys(body).length === 0) && (req as express.Request & { rawBody?: Buffer }).rawBody) {
+    const raw = ((req as express.Request & { rawBody?: Buffer }).rawBody ?? Buffer.from("{}")).toString("utf8");
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = req.body ?? {};
+    }
+  }
+
+  // Slack URL verification can arrive before full event wiring, and some
+  // intermediaries/proxies send this as form data. Respond immediately when
+  // a challenge value is present so the URL can be saved.
+  const challenge = body?.challenge ?? (typeof req.query.challenge === "string" ? req.query.challenge : undefined);
+  if (challenge) {
+    log("·", "slack", "url_verification challenge received");
+    res.status(200).json({ challenge });
+    return;
+  }
+
+  if (!verifySlackSignature(req)) {
+    log("·", "slack", "rejected: bad signature");
+    res.status(401).json({ error: "bad slack signature" });
+    return;
+  }
+
+  const envelopeType = String(body?.type ?? "unknown");
+  const event = body?.event ?? {};
+  const eventType = String(event?.type ?? "none");
+  const subtype = typeof event?.subtype === "string" ? event.subtype : "";
+  const channel = String(event?.channel ?? body?.channel_id ?? "none");
+  log("·", "slack", `event: envelope=${envelopeType}, type=${eventType}, subtype=${subtype || "none"}, channel=${channel}`);
+
+  if (body.type !== "event_callback") {
+    res.json({ ok: true, ignored: true, reason: `unsupported envelope type: ${envelopeType}` });
+    return;
+  }
+
+  const ignoreReasons: string[] = [];
+  if (event.type !== "message") ignoreReasons.push(`event.type=${eventType}`);
+  if (subtype) ignoreReasons.push(`subtype=${subtype}`);
+  if (event.bot_id) ignoreReasons.push("bot message");
+  if (!event.text) ignoreReasons.push("missing text");
+
+  if (event.type !== "message" || subtype || event.bot_id || !event.text) {
+    const reason = ignoreReasons.join(", ") || "filtered";
+    log("·", "slack", `ignored: ${reason}`);
+    res.json({ ok: true, ignored: true, reason });
+    return;
+  }
+
+  const parsed = parseTag(String(event.text));
+  const candidate = [...pendingAsks.entries()].find(([, p]) => (parsed.tag ? p.tag === parsed.tag : true));
+  if (candidate) {
+    const [id, pending] = candidate;
+    clearTimeout(pending.timer);
+    pendingAsks.delete(id);
+    log("←", "ask:reply", parsed.text, parsed.tag);
+    pending.resolve(parsed.text);
+    res.json({ ok: true, routed: "ask" });
+    return;
+  }
+
+  const ts = event.ts ? new Date(Number(event.ts) * 1000).toISOString() : new Date().toISOString();
+  const entry: InboxEntry = {
+    text: parsed.text,
+    tag: parsed.tag,
+    ts,
+  };
+  const out = ingestInboxEntry(entry, "slack");
+  res.json({ ok: true, routed: "inbox", waiters: out.waiters, sse: out.sse });
+});
+
 async function initTgOffset(token: string): Promise<number> {
   const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1&timeout=0`);
   const json = await r.json() as any;
   const results: any[] = json.result ?? [];
   return results.length > 0 ? results[results.length - 1].update_id + 1 : 0;
+}
+
+// Backoff + dedupe state for the long-poll loop. A flaky network or revoked
+// token used to spam the activity log with one line every 2s; instead we now
+// back off exponentially and collapse repeated identical errors into a count.
+let tgConsecutiveErrors = 0;
+let tgLastErrorMsg: string | null = null;
+let tgLastErrorCount = 0;
+let tgLastErrorLoggedAt = 0;
+
+function logTelegramError(msg: string) {
+  const now = Date.now();
+  if (msg === tgLastErrorMsg) {
+    tgLastErrorCount++;
+    // Re-emit a rollup line at most once every 30s while errors keep repeating.
+    if (now - tgLastErrorLoggedAt > 30_000) {
+      log("·", "telegram:error", `${msg} (×${tgLastErrorCount} since last log)`);
+      tgLastErrorLoggedAt = now;
+      tgLastErrorCount = 0;
+    }
+  } else {
+    log("·", "telegram:error", msg);
+    tgLastErrorMsg = msg;
+    tgLastErrorCount = 0;
+    tgLastErrorLoggedAt = now;
+  }
 }
 
 async function startTelegramListener() {
@@ -622,8 +1461,16 @@ async function startTelegramListener() {
         log("·", "telegram", `listener ready, offset=${tgPollOffset}`);
       }
       const r = await fetch(
-        `https://api.telegram.org/bot${token}/getUpdates?offset=${tgPollOffset}&timeout=10`
+        `https://api.telegram.org/bot${token}/getUpdates?offset=${tgPollOffset}&timeout=10`,
+        { signal: AbortSignal.timeout(15_000) }
       );
+      // Reset error state on any successful fetch.
+      if (tgConsecutiveErrors > 0) {
+        log("·", "telegram", `recovered after ${tgConsecutiveErrors} failed attempt(s)`);
+        tgConsecutiveErrors = 0;
+        tgLastErrorMsg = null;
+        tgLastErrorCount = 0;
+      }
       const json = await r.json() as any;
       for (const update of json.result ?? []) {
         tgPollOffset = update.update_id + 1;
@@ -631,6 +1478,7 @@ async function startTelegramListener() {
         if (msg?.chat?.id?.toString() === chatId && msg.text) {
           log("←", "telegram", msg.text);
           lastUserMessageId = msg.message_id;
+          lastTelegramInboundAt = Date.now();
           const { tag, text } = parseTag(msg.text);
           // Match an outstanding ask first. If the message is tagged, only
           // route to a pending ask from that same session — otherwise fall
@@ -648,16 +1496,36 @@ async function startTelegramListener() {
             const entry: InboxEntry = {
               text, ts: new Date().toISOString(), messageId: msg.message_id, tag,
             };
-            inboxQueue.push(entry);
-            broadcastInbox(entry);
-            log("·", "inbox", text, tag);
-            // Acknowledge receipt so user knows the message was queued.
-            // Wording is deliberately about *delivery*, not processing: the
-            // agent might be tailing the SSE stream (sees it immediately) or
-            // might only check on its next poll/notify call.
-            const ackText = tag
-              ? `📬 Delivered to @${tag}.`
-              : `📬 Delivered. The agent will process it on its next check-in.`;
+            // Waiters (wait_for_inbox long-poll) get first crack — they were
+            // already parked by an agent explicitly asking "wake me up when
+            // something arrives." Hand the entry off as a tool *result*, which
+            // every MCP client actually surfaces. Only queue if no one was
+            // waiting, so the message isn't delivered twice.
+            const waiters = takeWaitersFor(tag);
+            if (waiters.length > 0) {
+              for (const w of waiters) {
+                clearTimeout(w.timer);
+                w.resolve([entry]);
+              }
+              log("·", "inbox", `${text} → ${waiters.length} long-poll waiter(s)`, tag);
+            } else {
+              inboxQueue.push(entry);
+            }
+            writeInboxDrop(entry);
+            const liveSseCount = broadcastInbox(entry);
+            log("·", "inbox", `${text} (sse=${liveSseCount}, waiters=${waiters.length})`, tag);
+            const sseCount = sseSubscribersForTag(tag);
+            const anyoneListening = sseCount > 0 || waiters.length > 0;
+            let ackText: string;
+            if (!anyoneListening && tag) {
+              ackText = `📭 No session @${tag} connected. Message queued — next @${tag} to connect will pick it up.`;
+            } else if (!anyoneListening) {
+              ackText = `📭 No agents connected. Message queued — next agent to connect will pick it up.`;
+            } else {
+              ackText = tag
+                ? `📬 Routed to @${tag}. Waiting for reply.`
+                : `📬 Broadcast to ${sseCount} listener${sseCount === 1 ? "" : "s"}. Waiting for reply.`;
+            }
             fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -672,9 +1540,12 @@ async function startTelegramListener() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes("terminated") && !msg.includes("aborted")) {
-        log("·", "telegram:error", msg);
+        logTelegramError(msg);
       }
-      await new Promise(r => setTimeout(r, 2000));
+      tgConsecutiveErrors++;
+      // Exponential backoff: 2s → 5s → 10s → 20s → 40s → cap at 60s.
+      const delay = Math.min(60_000, 2000 * Math.pow(2, Math.min(5, tgConsecutiveErrors - 1)));
+      await new Promise(r => setTimeout(r, delay));
     }
   }
 }
@@ -720,12 +1591,183 @@ function drainInboxFor(tag: string | undefined): InboxEntry[] {
   return taken;
 }
 
+// Appends an inbox block to any tool's text payload when messages are pending
+// for the given session. Lets cheap read tools (get_idle_seconds, get_dnd_status)
+// double as inbox drains, so a busy agent calling them as a keepalive still
+// sees user messages even when it hasn't called notify/poll in a while.
+function appendInbox(baseText: string, sessionTag: string | undefined, clientId: string | undefined): string {
+  const messages = drainInboxFor(sessionTag);
+  if (messages.length === 0) return baseText;
+  log("·", "poll", `${messages.length} message(s) drained via heartbeat`, clientId);
+  const inbox = messages.map(m => `[${m.ts}] ${m.text}`).join("\n");
+  return `${baseText}\n\n⚠️ USER SENT YOU A MESSAGE — STOP AND RESPOND BEFORE CONTINUING:\n${inbox}`;
+}
+
+const MCP_INSTRUCTIONS = `
+This server delivers notifications to the user through whatever channels the
+user has configured on the server side. The client never needs to know which
+channels are in use — just call 'notify' or 'ask' with a generic message.
+
+BEHAVIORAL RULES for every client that connects:
+
+1. ALWAYS call 'notify' in these three situations — idle or not, DND or not,
+   the server decides routing, you decide whether to fire:
+
+   (a) LONG PROCESSING FINISHED. Any single task that took more than ~60
+       seconds of wall-clock time (long build, test run, backtest, migration,
+       big refactor, multi-step plan) gets a 'notify' the moment it completes
+       — success OR failure. Rule of thumb: if the user could have reasonably
+       walked away to grab coffee while you ran, they need a ping on the way
+       back. Don't try to guess whether they were watching. Just notify.
+
+   (b) YOU HAVE A QUESTION OR NEED A DECISION. Any time you're about to ask
+       the user something — "should I delete these?", "which branch?",
+       "proceed with plan B?" — fire 'notify' (or 'ask' for blocking
+       two-way). Silent questions in the terminal get missed; a notification
+       does not.
+
+   (c) SOMETHING IMPORTANT HAPPENED that the user needs to know about right
+       now. Examples: a test suddenly failed after being green, a destructive
+       operation is about to run, you found a security issue, a deploy
+       succeeded, a production service looks degraded, you hit an
+       unrecoverable error. When in doubt on importance, ERR ON THE SIDE OF
+       NOTIFYING — the server's idle gating will automatically downgrade a
+       mis-judged 'normal' to a silent desktop banner if the user is active,
+       so the cost of over-notifying is near zero. The cost of missing a
+       real event is that the user finds out 4 hours later.
+
+   The SERVER handles all routing (DND, idle threshold, channel selection,
+   priority escalation). You do NOT need to pre-flight with
+   'get_idle_seconds' before these three triggers — fire 'notify' and let
+   the server decide. get_idle_seconds is the HEARTBEAT primitive (rule 6),
+   not a gate on legitimate milestones.
+
+2. Use priority correctly:
+   - 'low'    = email only — for low-stakes status (background completion).
+   - 'normal' = desktop + Telegram + email — the default.
+   - 'high'   = all channels including SMS — bypasses DND AND idle gating.
+                Use ONLY for catastrophic findings or decisions that block
+                progress. Misuse will train the user to ignore your notifs.
+
+3. Echo the COMPLETE, UNTRUNCATED message body in your own chat / conversation
+   output as well as sending it through 'notify'. The user may be reading the
+   terminal directly; don't rely on them checking their phone / email. Do NOT
+   shorten, summarise, or cut off the message with "…" in your chat output —
+   show every word exactly as sent.
+
+4. The message body should be channel-agnostic. Never name 'Telegram', 'SMS',
+   'email', 'desktop', etc. in your messages or in your chat output — those are
+   server delivery details the user has already configured and the client has
+   no business surfacing. Do NOT echo "Sent via: <channel list>" or any
+   variant of it. Just say 'notif' or 'notification' if you need to refer to
+   the act of notifying.
+
+5. When the user sends you an unsolicited message (visible as INBOX items in
+   the 'notify' response, via 'poll', via 'wait_for_inbox', via
+   'get_idle_seconds' piggy-back, or via the /api/inbox/stream SSE), reply to
+   them THROUGH 'notify' so the reply
+   actually reaches them — not just in your chat output. Multiple agents may
+   be connected simultaneously — the server broadcasts every untagged inbox
+   message to all of them, so the user can see who is listening. Your reply
+   MUST identify which session you are (start with your own tag or client id,
+   e.g. "[@alphawave]" or "[sess-abcd]") and give a brief status so the user
+   can pick whom to respond to. If the user tagged their message (@<tag>),
+   only the session with that tag should reply. If you are untagged and
+   another session with the same project/workdir is already tagged, let the
+   tagged one reply.
+
+5a. BUSY-ACK RULE (hard requirement): The moment you notice a user inbox
+    message — whether via notify response, heartbeat piggy-back, or poll —
+    REPLY IMMEDIATELY via 'notify' with a terse status, EVEN IF YOU CAN'T
+    ACT ON THE REQUEST YET. Do not finish the current tool/task first.
+    Drop what you're doing long enough to fire one 'notify' call, THEN
+    resume. Format: "[<your-session-id>] busy on <current-task>; will
+    respond at <milestone>". The user needs to know (a) you heard them,
+    (b) you're not the stuck one, (c) when to expect a real answer. An
+    inbox message that gets a delayed reply is worse than no reply — it
+    wastes the user's time waiting on silence.
+
+6. The 'get_idle_seconds', 'get_idle_config', and 'get_dnd_status' tools are
+   informational reads, but they ALSO drain pending inbox messages. Use them
+   as a cheap heartbeat during long work: call 'get_idle_seconds' EVERY 15-
+   30 SECONDS while a long task runs (loop iteration, backtest, scan, build,
+   etc.). If the user sent you a message while you were busy, it comes back
+   piggy-backed on the response — you don't need to separately call 'poll'.
+   This is a lightweight local read (no network, no DND or channel routing),
+   so the cost is near zero. Without this heartbeat pattern, a busy agent is
+   deaf to the user until its next 'notify' call — which may be minutes or
+   hours away during long work. Treat 'get_idle_seconds' as the "check for
+   user input" primitive, not an idle-gate check.
+
+   If your work is naturally idle (waiting for the user, between loop iters),
+   prefer 'wait_for_inbox' instead — it blocks up to 50s and returns the
+   moment the user types anything, as a tool result. That's the most reliable
+   delivery path across every MCP client (notifications over SSE are silently
+   dropped by Claude Code, Cursor, and others). Loop pattern:
+     while (true) {
+       const r = await wait_for_inbox({ timeout_seconds: 50 });
+       if (r !== "inbox:empty") handle(r);
+     }
+
+7. If your tool call fails with "MCP server not connected" / "transport
+   closed" / similar — the SERVER IS ALMOST CERTAINLY FINE. Other clients are
+   connected to the same server right now. Only YOUR client's transport
+   broke (commonly: stdio child process died, or HTTP client gave up after a
+   transient slow response at startup). DO NOT tell the user "notify is down"
+   without first probing the server directly.
+
+   Probe before declaring the server dead:
+     curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3737/mcp
+   - 406 (Not Acceptable) = server is healthy, doing MCP protocol
+     negotiation. Your client is the broken party. Use the bypass below.
+   - Connection refused / timeout = server is genuinely down. Tell the user.
+
+   HTTP-transport bypass when your MCP client is broken (works from any
+   shell that has curl). Three calls, stateful — the session id from step 1
+   must be passed in mcp-session-id on every subsequent call:
+
+     # 1) initialize and capture session id from response headers
+     SID=$(curl -s -i -X POST http://localhost:3737/mcp \
+       -H "Content-Type: application/json" \
+       -H "Accept: application/json, text/event-stream" \
+       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl-bridge","version":"1.0"}}}' \
+       | grep -i "^mcp-session-id:" | awk '{print $2}' | tr -d '\r')
+
+     # 2) ack initialized (no response body, fire-and-forget)
+     curl -s -X POST http://localhost:3737/mcp \
+       -H "Content-Type: application/json" \
+       -H "Accept: application/json, text/event-stream" \
+       -H "mcp-session-id: $SID" \
+       -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+
+     # 3) call any tool — successful response includes "Sent via: <channel>"
+     curl -s -X POST http://localhost:3737/mcp \
+       -H "Content-Type: application/json" \
+       -H "Accept: application/json, text/event-stream" \
+       -H "mcp-session-id: $SID" \
+       -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"notify","arguments":{"message":"YOUR MESSAGE","priority":"normal"}}}'
+
+   Same pattern works for 'ask', 'poll', 'get_idle_seconds', etc. — change
+   the "name" and "arguments" in step 3. Reuse the same $SID for all calls
+   in one bypass session.
+
+   Bottom line: rule #1 still applies. If you owe the user a notify and your
+   MCP client is broken, you owe them the bypass — not an excuse.
+`.trim();
+
 function createMcpServer(clientId: string, sessionTag?: string) {
-  const server = new McpServer({ name: "notify-mcp", version: "1.0.0" });
+  const identity = sessionTag ? `@${sessionTag}` : clientId;
+  const identityLine = `\nYOUR SESSION IDENTITY: "${identity}" — use this as your prefix in all notify replies (e.g. "[${identity}] done with build").\n`;
+  const server = new McpServer(
+    { name: "notify-mcp", version: "1.0.0" },
+    { instructions: identityLine + MCP_INSTRUCTIONS }
+  );
 
   server.tool(
     "notify",
-    "Send a notification through configured channels (desktop, Telegram, SMS, email). " +
+    "Send a notification to the user. Delivery channels and DND are server-configured. " +
+      "Before calling, check get_idle_seconds against get_idle_config.thresholdSeconds; " +
+      "skip the call if the user is active (unless priority='high'). " +
       "Use for: task milestones, questions needing input, catastrophic findings, long task completion.",
     {
       message: z.string().max(500).describe("Notification message, max 500 chars"),
@@ -747,8 +1789,8 @@ function createMcpServer(clientId: string, sessionTag?: string) {
 
   server.tool(
     "ask",
-    "Send a question and wait for the user's reply via Telegram or email. " +
-      "Use when Claude needs a decision before continuing — e.g. 'Should I delete these files?'",
+    "Send a question to the user and wait for their reply. Channels are server-configured. " +
+      "Use when a decision is needed before continuing — e.g. 'Should I delete these files?'",
     {
       question: z.string().max(500).describe("The question to ask the user"),
       timeout_seconds: z.number().min(30).max(3600).default(300)
@@ -823,8 +1865,9 @@ function createMcpServer(clientId: string, sessionTag?: string) {
 
   server.tool(
     "poll",
-    "Check for unsolicited messages the user sent on Telegram (not in response to an ask). " +
-      "Returns queued messages and clears the queue. Returns 'inbox:empty' if nothing pending.",
+    "Check for unsolicited messages the user has sent. " +
+      "Returns queued messages and clears the queue. Returns 'inbox:empty' if nothing pending. " +
+      "Prefer subscribing to the /api/inbox/stream SSE endpoint for real-time delivery.",
     {},
     async () => {
       const messages = drainInboxFor(sessionTag);
@@ -841,38 +1884,477 @@ function createMcpServer(clientId: string, sessionTag?: string) {
     }
   );
 
+  server.tool(
+    "wait_for_inbox",
+    "Block until the user sends an unsolicited message, or until the timeout " +
+      "expires. Returns the message(s) as tool results (the reliable MCP delivery " +
+      "path — notifications over SSE are dropped by many clients). Default timeout " +
+      "is 50s to stay under the JS SDK's 60s request timeout; keep the agent-side " +
+      "loop re-calling on empty so a quiet user doesn't leak an abandoned waiter. " +
+      "If messages are already queued for this session, returns them immediately.",
+    {
+      timeout_seconds: z.number().min(5).max(55).default(50)
+        .describe("How long to block before returning empty (5-55s)"),
+    },
+    async ({ timeout_seconds = 50 }: { timeout_seconds?: number }) => {
+      // Fast-path: if there are already messages queued for this session tag,
+      // drain and return them without parking a waiter.
+      const queued = drainInboxFor(sessionTag);
+      if (queued.length > 0) {
+        const body = queued.map(m => `[${m.ts}] ${m.text}`).join("\n");
+        return { content: [{ type: "text" as const, text: `⚠️ USER SENT YOU A MESSAGE — STOP AND RESPOND BEFORE CONTINUING:\n${body}` }] };
+      }
+      const token = randomUUID();
+      const entries = await new Promise<InboxEntry[]>((resolve) => {
+        const timer = setTimeout(() => {
+          inboxWaiters.delete(token);
+          resolve([]);
+        }, timeout_seconds * 1000);
+        inboxWaiters.set(token, { resolve, timer, tag: sessionTag });
+      });
+      if (entries.length === 0) {
+        return { content: [{ type: "text" as const, text: "inbox:empty" }] };
+      }
+      log("·", "wait_for_inbox", `${entries.length} message(s) delivered`, clientId);
+      const body = entries.map(m => `[${m.ts}] ${m.text}`).join("\n");
+      return { content: [{ type: "text" as const, text: `⚠️ USER SENT YOU A MESSAGE — STOP AND RESPOND BEFORE CONTINUING:\n${body}` }] };
+    }
+  );
+
+  server.tool(
+    "get_idle_seconds",
+    "Returns the number of seconds since the user's last keyboard/mouse input. " +
+      "Call this periodically during long work as a cheap heartbeat — the server " +
+      "will piggy-back any pending inbox messages in the response, so you stay " +
+      "responsive to the user without having to call poll. Returns -1 if idle " +
+      "detection is unsupported on this platform — in that case, proceed without " +
+      "gating (fail-open).",
+    {},
+    async () => {
+      const secs = getOsIdleSeconds();
+      return { content: [{ type: "text" as const, text: appendInbox(String(secs), sessionTag, clientId) }] };
+    }
+  );
+
+  server.tool(
+    "get_idle_config",
+    "Returns the server's idle gating policy: { enabled, thresholdSeconds, alwaysDesktopWhenActive }. " +
+      "Informational only — the server gates internally on every notify call. " +
+      "Also drains pending inbox messages — safe to use as a heartbeat.",
+    {},
+    async () => {
+      const cfg = loadConfig();
+      const idle = cfg.idle ?? { enabled: true, thresholdSeconds: 120, alwaysDesktopWhenActive: true };
+      return { content: [{ type: "text" as const, text: appendInbox(JSON.stringify(idle), sessionTag, clientId) }] };
+    }
+  );
+
+  server.tool(
+    "get_dnd_status",
+    "Returns the current DND state: " +
+      "{ active: boolean, reason: 'manual' | 'schedule' | 'off' }. " +
+      "When active, the server will suppress delivery for priority < high. " +
+      "Also drains pending inbox messages — safe to use as a heartbeat.",
+    {},
+    async () => {
+      const cfg = loadConfig();
+      const active = isDndActive(cfg);
+      let reason = "off";
+      if (active) {
+        reason = cfg.dnd?.enabled ? "manual" : "schedule";
+      }
+      return {
+        content: [{ type: "text" as const, text: appendInbox(JSON.stringify({ active, reason }), sessionTag, clientId) }],
+      };
+    }
+  );
+
+  server.tool(
+    "update_instructions",
+    "Persist a block of behavioral instructions for this client into its CLAUDE.md " +
+      "(or equivalent config file) so they survive session restarts and context compaction. " +
+      "Call this whenever the user asks you to remember a rule, change a behavior, or update " +
+      "how you should act — the instructions will be reloaded on every future session. " +
+      "Pass the full desired instructions block; it replaces the previous block atomically.",
+    {
+      instructions: z.string().max(4000).describe("The full instructions block to persist"),
+      target: z.enum(["global", "project"]).default("global").describe(
+        "global = ~/.claude/CLAUDE.md (all projects); project = .claude/CLAUDE.md in cwd"
+      ),
+    },
+    async ({ instructions, target }) => {
+      try {
+        const MARKER_START = "<!-- omni-notify-mcp:instructions:start -->";
+        const MARKER_END   = "<!-- omni-notify-mcp:instructions:end -->";
+        const block = `${MARKER_START}\n## omni-notify-mcp behavioral rules\n\n${instructions.trim()}\n${MARKER_END}`;
+
+        let claudeMdPath: string;
+        if (target === "global") {
+          const claudeDir = join(homedir(), ".claude");
+          if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+          claudeMdPath = join(claudeDir, "CLAUDE.md");
+        } else {
+          const projectClaudeDir = join(process.cwd(), ".claude");
+          if (!existsSync(projectClaudeDir)) mkdirSync(projectClaudeDir, { recursive: true });
+          claudeMdPath = join(projectClaudeDir, "CLAUDE.md");
+        }
+
+        let existing = "";
+        if (existsSync(claudeMdPath)) {
+          existing = readFileSync(claudeMdPath, "utf8");
+        }
+
+        let updated: string;
+        if (existing.includes(MARKER_START)) {
+          // Replace existing block
+          const startIdx = existing.indexOf(MARKER_START);
+          const endIdx   = existing.indexOf(MARKER_END);
+          if (endIdx !== -1) {
+            updated = existing.slice(0, startIdx) + block + existing.slice(endIdx + MARKER_END.length);
+          } else {
+            updated = existing.slice(0, startIdx) + block;
+          }
+        } else {
+          // Append
+          updated = existing + (existing.endsWith("\n") || existing === "" ? "" : "\n") + "\n" + block + "\n";
+        }
+
+        writeFileSync(claudeMdPath, updated, "utf8");
+        return {
+          content: [{ type: "text" as const, text: `Instructions persisted to ${claudeMdPath}` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Failed to persist instructions: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   return server;
 }
 
 const httpTransports: Record<string, StreamableHTTPServerTransport> = {};
 
+interface SessionMeta {
+  clientId: string;      // display name: tag or workspace name or sess-xxxx
+  tag?: string;          // user-supplied session tag from ?tag=
+  clientName?: string;   // MCP clientInfo.name (e.g. "claude-code")
+  clientVersion?: string;
+  workspaceName?: string; // workspace folder name (e.g. "AlphaWave")
+  host?: string;         // remote address of the client
+  connectedAt: number;
+  lastSeen: number;      // last time we saw any request from this session
+}
+const sessions: Record<string, SessionMeta> = {};
+
+// Reap sessions that haven't made any request in a while. Keeps the sessions
+// list and pills bar accurate even when clients vanish without closing their
+// transport (VS Code window closed, laptop lid shut, network died). On next
+// reconnect the client gets a 404 and reinitializes cleanly.
+//
+// The MCP instructions force agents to call get_idle_seconds every 15–30s as a
+// keepalive, so any session that hasn't made *any* request in 90s is almost
+// certainly dead. Keep this tight — the whole point is that stale sessions
+// stop showing up in broadcast acks.
+const SESSION_IDLE_TIMEOUT_MS = 90 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, meta] of Object.entries(sessions)) {
+    if (now - meta.lastSeen > SESSION_IDLE_TIMEOUT_MS) {
+      log("·", "session", `reaped idle session ${meta.clientId} (last seen ${Math.round((now - meta.lastSeen) / 1000)}s ago)`);
+      try { httpTransports[sessionId]?.close(); } catch { /* ignore */ }
+      delete httpTransports[sessionId];
+      delete sessions[sessionId];
+    }
+  }
+  // Prune SSE inbox subscribers whose underlying socket has died. Node
+  // surfaces dead sockets as destroyed/writableEnded — if we don't sweep
+  // these, broadcastInbox quietly writes to ghosts and the ack count lies
+  // to the user ("Broadcast to 3 sessions" when there's really one).
+  for (const c of inboxStreamClients) {
+    if (c.res.destroyed || c.res.writableEnded || !c.res.writable) {
+      inboxStreamClients.delete(c);
+    }
+  }
+}, 15_000);
+
+function listActiveSessions(): SessionMeta[] {
+  return Object.values(sessions);
+}
+
+function sessionsMatchingTag(tag: string | undefined): SessionMeta[] {
+  if (!tag) return listActiveSessions();
+  return listActiveSessions().filter(s => s.tag === tag);
+}
+
+// Count live SSE subscribers on /api/inbox/stream that would receive a message
+// with the given tag. Stdio-bridge clients subscribe via SSE but don't always
+// appear in sessions[] (their /mcp initialize session can get reaped while the
+// SSE stream stays alive). Without counting them, the Telegram ack lies with
+// "no agents connected" even when a bridge is actively listening.
+function sseSubscribersForTag(tag: string | undefined): number {
+  let n = 0;
+  for (const c of inboxStreamClients) {
+    if (c.res.destroyed || c.res.writableEnded || !c.res.writable) continue;
+    if (tag && c.tag !== tag) continue;
+    n++;
+  }
+  return n;
+}
+
+// Synchronous best-effort liveness check before we count sessions in an ack.
+// The transport's SDK doesn't expose a "ping" API, but it does hold a ref to
+// the response stream of the last GET the client opened — if that stream is
+// destroyed/ended, the client is gone. We also use the `lastSeen` shortcut:
+// if a session hasn't made a request in more than (idle+grace) seconds and
+// the MCP instructions require a 15-30s heartbeat, it's dead. Be lenient —
+// false-positives here result in lying to the user; false-negatives just
+// cause a harmless write that the next reap will clean up.
+const LIVE_GRACE_MS = 60_000;
+function pruneDeadSessions(): void {
+  const now = Date.now();
+  for (const [sessionId, meta] of Object.entries(sessions)) {
+    const stale = now - meta.lastSeen > LIVE_GRACE_MS;
+    const transport = httpTransports[sessionId] as any;
+    // The SDK stashes the active response stream on the transport for server-
+    // sent notifications. If it exists and is dead, prune. Guarded because
+    // the internal field name isn't stable across SDK versions.
+    const streams: any[] = [transport?._streams, transport?._responseStreams, transport?._sseResponse]
+      .filter(Boolean)
+      .flatMap(s => (s instanceof Map ? [...s.values()] : Array.isArray(s) ? s : [s]));
+    const deadStream = streams.length > 0 && streams.every(r => r?.destroyed || r?.writableEnded || r?.writable === false);
+    if (stale || deadStream) {
+      log("·", "session", `pruned unresponsive session ${meta.clientId} (stale=${stale}, deadStream=${deadStream})`);
+      try { httpTransports[sessionId]?.close(); } catch { /* ignore */ }
+      delete httpTransports[sessionId];
+      delete sessions[sessionId];
+    }
+  }
+}
+
+function sessionDisplay(s: SessionMeta): string {
+  return s.tag ? `@${s.tag}` : s.clientId;
+}
+
 app.all("/mcp", async (req, res) => {
+  if (!ENABLE_MCP) {
+    res.status(404).json({
+      error: "mcp_disabled",
+      message: "MCP transport is disabled. Set ENABLE_MCP=1 to enable /mcp.",
+    });
+    return;
+  }
+  console.log("[debug-url]", req.method, req.url, "query:", JSON.stringify(req.query), "ua:", req.headers["user-agent"]);
   const existingSessionId = req.headers["mcp-session-id"] as string | undefined;
 
   if (existingSessionId && httpTransports[existingSessionId]) {
-    await httpTransports[existingSessionId].handleRequest(req, res, req.body);
+    const transport = httpTransports[existingSessionId];
+    await transport.handleRequest(req, res, req.body);
+    // Lazy-populate clientInfo after initialize lands on an existing session.
+    const meta = sessions[existingSessionId];
+    if (meta) meta.lastSeen = Date.now();
+    const mcpServer = (httpTransports[existingSessionId] as any)?.__mcpServer;
+    if (meta && !meta.clientName && mcpServer?.getClientVersion) {
+      try {
+        const info = mcpServer.getClientVersion();
+        if (info) {
+          meta.clientName = info.name;
+          meta.clientVersion = info.version;
+        }
+      } catch { /* ignore */ }
+    }
+    return;
+  }
+
+  // Auto-reconnect path. If the client presents a session id we don't know
+  // about AND the request body is a fresh `initialize`, adopt the stale id
+  // instead of 404-ing. This covers the "server was restarted while Claude
+  // Code was open" case: clients that cache the session id (claude-code#27142)
+  // would otherwise stay ghost until the human manually reloaded the window.
+  // A non-initialize request with an unknown id still gets 404 — the client
+  // is expected to reinitialize in response.
+  const bodyIsInitialize =
+    req.method === "POST" &&
+    req.body &&
+    (Array.isArray(req.body)
+      ? req.body.some((m: any) => m?.method === "initialize")
+      : req.body.method === "initialize");
+
+  if (existingSessionId && !bodyIsInitialize) {
+    res.status(404).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Session not found — reinitialize" },
+      id: null,
+    });
     return;
   }
 
   const rawTag = typeof req.query.tag === "string" ? req.query.tag : undefined;
   const sessionTag = rawTag?.toLowerCase().replace(/[^a-z0-9_-]/g, "") || undefined;
-  const newSessionId = randomUUID();
-  const clientId = sessionTag ?? `sess-${newSessionId.slice(0, 8)}`;
+  // If the client brought a stale id on an initialize, reuse it so the client
+  // never has to swap ids. Otherwise mint a fresh one.
+  const newSessionId = existingSessionId ?? randomUUID();
+  const host = (req.socket.remoteAddress || "").replace(/^::ffff:/, "") || undefined;
+  const port = req.socket.remotePort;
+  // Pull clientInfo and workspace from the initialize body immediately so the
+  // pill shows a readable name from the start.
+  const initBody = Array.isArray(req.body)
+    ? req.body.find((m: any) => m?.method === "initialize")
+    : req.body;
+  const earlyClientName: string | undefined = initBody?.params?.clientInfo?.name;
+  // Prefer the workspace folder name (e.g. "AlphaWave", "notify-mcp-src") over
+  // the generic client name ("claude-code"). workspaceFolders[0].name is set by
+  // Claude Code and Cursor; rootUri is the fallback.
+  const workspaceFolders: any[] | undefined = initBody?.params?.workspaceFolders;
+  const rootUri: string | undefined = initBody?.params?.rootUri ?? initBody?.params?.root_uri;
+  const workspaceName: string | undefined =
+    workspaceFolders?.[0]?.name ||
+    (rootUri ? rootUri.replace(/\\/g, "/").split("/").filter(Boolean).pop() : undefined);
+  // Build a distinguishable client id: tag wins if set; workspace name next;
+  // then clientInfo.name; otherwise use host+port. If the base id is already
+  // taken, append -2, -3, … so two windows on the same project still show up.
+  const baseId = sessionTag
+    ?? workspaceName
+    ?? earlyClientName
+    ?? (host && port ? `${host === "127.0.0.1" || host === "::1" ? "local" : host}:${port}` : `sess-${newSessionId.slice(0, 8)}`);
+  // Exclude the session being re-adopted from the "taken" set — it's about to
+  // be replaced, so its old clientId should be available for reuse.
+  const adoptingId = existingSessionId && bodyIsInitialize ? existingSessionId : undefined;
+  const takenIds = new Set(
+    Object.entries(sessions)
+      .filter(([sid]) => sid !== adoptingId)
+      .map(([, s]) => s.clientId)
+  );
+  let clientId = baseId;
+  for (let n = 2; takenIds.has(clientId); n++) clientId = `${baseId}-${n}`;
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => newSessionId });
   transport.onclose = () => {
-    if (transport.sessionId) delete httpTransports[transport.sessionId];
+    if (transport.sessionId) {
+      delete httpTransports[transport.sessionId];
+      delete sessions[transport.sessionId];
+    }
   };
-  await createMcpServer(clientId, sessionTag).connect(transport);
+  const mcpServer = createMcpServer(clientId, sessionTag);
+  await mcpServer.connect(transport);
+  // Stash the underlying MCP server on the transport so subsequent requests
+  // can grab clientInfo once the initialize handshake completes.
+  (transport as any).__mcpServer = (mcpServer as any).server ?? mcpServer;
   await transport.handleRequest(req, res, req.body);
-  if (transport.sessionId) httpTransports[transport.sessionId] = transport;
+  if (transport.sessionId) {
+    httpTransports[transport.sessionId] = transport;
+    const now = Date.now();
+    sessions[transport.sessionId] = {
+      clientId, tag: sessionTag, host, connectedAt: now, lastSeen: now,
+      clientName: earlyClientName,
+      clientVersion: initBody?.params?.clientInfo?.version,
+      workspaceName,
+    };
+    trackReconnect(clientId);
+  }
 });
+
+// ── Reconnect tracker ─────────────────────────────────────────────────────────
+// After server restart, collect clients that reconnect within RECONNECT_WINDOW_MS
+// then send a single notify confirming they received updated instructions.
+
+const RECONNECT_WINDOW_MS = 20_000;
+const reconnectedClients: string[] = [];
+let reconnectNotifScheduled = false;
+const serverStartedAt = Date.now();
+
+function trackReconnect(clientId: string): void {
+  if (Date.now() - serverStartedAt > RECONNECT_WINDOW_MS) return;
+  if (reconnectedClients.includes(clientId)) return;
+  reconnectedClients.push(clientId);
+  if (!reconnectNotifScheduled) {
+    reconnectNotifScheduled = true;
+    setTimeout(async () => {
+      const list = reconnectedClients.join(", ");
+      const count = reconnectedClients.length;
+      const msg = `${count} client${count === 1 ? "" : "s"} reconnected and received updated instructions: ${list}`;
+      try { await sendNotification(msg, "low", "omni-notify-mcp"); } catch { /* best effort */ }
+    }, RECONNECT_WINDOW_MS);
+  }
+}
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, "0.0.0.0", () => {
+const httpServer = app.listen(PORT, "0.0.0.0", () => {
   const ip = getLocalIp();
   console.log(`\n  Claude Notify config UI  → http://localhost:${PORT}`);
-  console.log(`  MCP endpoint (remote)    → http://${ip}:${PORT}/mcp\n`);
+  if (ENABLE_MCP) {
+    console.log(`  MCP endpoint (remote)    → http://${ip}:${PORT}/mcp\n`);
+  } else {
+    console.log("  MCP endpoint (remote)    → disabled (set ENABLE_MCP=1 to enable)\n");
+  }
   startTelegramListener();
   open(`http://localhost:${PORT}`).catch(() => {});
 });
+
+// TCP-level keepalive on every incoming socket. Without this, a client that
+// vanishes (laptop lid, killed VS Code, WiFi drop) leaves a half-open TCP
+// connection that Node never notices — the SDK's `onclose` therefore never
+// fires and the session goes zombie. With SO_KEEPALIVE the OS probes every
+// 15s and kills the socket within a couple minutes of silence, which fires
+// our reaper and clears the session bookkeeping.
+httpServer.on("connection", (socket) => {
+  socket.setKeepAlive(true, 15_000);
+});
+// keepAliveTimeout gates how long Node holds an HTTP/1.1 keep-alive idle
+// connection open before closing it. Default is 5s, which was fine for
+// short-lived requests but kills long-poll waiters and MCP GET streams
+// prematurely. Bump above the 55s long-poll ceiling so the socket stays
+// alive across the whole wait. headersTimeout must exceed it.
+httpServer.keepAliveTimeout = 75_000;
+httpServer.headersTimeout = 80_000;
+
+// App-level keepalive on every active MCP GET SSE stream. The SDK doesn't
+// emit any bytes on an idle stream, so intermediate proxies and some clients
+// time out the stream after ~60s of silence. We write an SSE *comment* line
+// (`: keepalive\n\n`) directly to each live response — comments are ignored
+// by SSE parsers but reset proxy idle timers and surface dead sockets as
+// write errors that we can catch and reap. Pattern is the community-standard
+// fix for typescript-sdk#270.
+setInterval(() => {
+  for (const [sid, transport] of Object.entries(httpTransports)) {
+    const t = transport as any;
+    // Internal field names vary across SDK versions. Collect every candidate
+    // response stream reference; the ones we find are either Response-like
+    // objects with .write or Maps/arrays of them. Write-failure is the signal
+    // that tells us the socket is dead.
+    const candidates: any[] = [];
+    for (const key of ["_streamMapping", "_streams", "_responseStreams", "_sseResponse", "_responses"]) {
+      const v = t[key];
+      if (!v) continue;
+      if (v instanceof Map) candidates.push(...v.values());
+      else if (Array.isArray(v)) candidates.push(...v);
+      else candidates.push(v);
+    }
+    let wrote = false;
+    let allDead = candidates.length > 0;
+    for (const r of candidates) {
+      if (!r || r.destroyed || r.writableEnded || r.writable === false) continue;
+      try {
+        r.write(`: keepalive ${Date.now()}\n\n`);
+        wrote = true;
+        allDead = false;
+      } catch {
+        // write failed — socket is dead, move on
+      }
+    }
+    if (candidates.length > 0 && allDead) {
+      try { httpTransports[sid]?.close(); } catch { /* ignore */ }
+      delete httpTransports[sid];
+      delete sessions[sid];
+    }
+    // Touch lastSeen on a successful keepalive write so the reaper doesn't
+    // kill a session that's quietly connected but idle. lastSeen normally
+    // tracks inbound requests; extending it to "stream is verified writable"
+    // is fine — if the write succeeds, the client really is still there.
+    if (wrote && sessions[sid]) {
+      sessions[sid].lastSeen = Date.now();
+    }
+  }
+}, 20_000);
