@@ -9,3 +9,6 @@ package-lock.json
 tokens.txt
 *.vsix
 vscode-extension/package.json
+CLAUDE.md
+.claude/rules.sh
+.claude/rules-enforced.log
