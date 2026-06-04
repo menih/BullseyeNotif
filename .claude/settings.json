@@ -21,5 +21,25 @@
     ]
   },
   "effortLevel": "xhigh",
-  "skipDangerousModePermissionPrompt": true
+  "skipDangerousModePermissionPrompt": true,
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/sync-shared.sh\"", "timeout": 30 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 10 },
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"", "timeout": 10 }
+      ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 10 } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 15 } ] }
+    ]
+  }
 }
