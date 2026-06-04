@@ -190,10 +190,14 @@ const server = new McpServer(
       experimental: { "claude/channel": {} },
     },
     instructions:
-      "This is the stdio bridge for notify-mcp. It pushes unsolicited user " +
-      "messages to the agent via `notifications/claude/channel` when the host " +
-      "supports Channels (Claude Code v2.1.80+). Otherwise call `wait_for_inbox` " +
-      "as a long-poll to reliably receive user messages as tool results.\n\n" +
+      "This is the stdio bridge for notify-mcp. To receive unsolicited user " +
+      "messages in ANY MCP host (Claude Code, Copilot, Cursor), call `wait_for_inbox` " +
+      "— it long-polls up to 50s and returns new user messages as tool results. Call " +
+      "it whenever you finish a task or would otherwise wait, then again right after " +
+      "handling each batch, so messages keep arriving. (The Claude Code CLI launched " +
+      "with `--channels` ALSO delivers messages as synthetic turns automatically, but " +
+      "that path does NOT exist in the VSCode extension or Copilot — `wait_for_inbox` " +
+      "is the reliable lowest-common-denominator mechanism across every host.)\n\n" +
       "ALWAYS call `notify` when: (a) a task that took >60s of wall-clock time " +
       "just finished (success or failure), (b) you have a question or need a " +
       "decision, (c) something important happened the user needs to know right " +

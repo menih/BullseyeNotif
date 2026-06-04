@@ -39,7 +39,10 @@
       { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 10 } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 15 } ] }
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 15 },
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"", "timeout": 10 }
+      ] }
     ]
   }
 }
