@@ -1,0 +1,14 @@
+{
+  "folders": [
+    { "path": "." },
+    { "path": "../BullseyeShared", "name": "BullseyeShared (master rules)" }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.classpath": true,
+      "**/.project": true,
+      "**/.settings": true,
+      "**/target": true
+    }
+  }
+}
