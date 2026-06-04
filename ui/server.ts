@@ -13,6 +13,9 @@ import nodemailer from "nodemailer";
 import twilio from "twilio";
 import { tmpdir } from "os";
 import { sendWithRouting } from "./messaging/notificationEngine.js";
+import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3737;
 const REDIRECT_URI = `http://localhost:${PORT}/auth/google/callback`;
@@ -24,6 +27,7 @@ const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 const ADC_PATH = join(homedir(), ".config", "gcloud", "application_default_credentials.json");
 const AGENT_API_KEY = (process.env.NOTIFY_AGENT_KEY ?? "").trim();
 const SLACK_SIGNING_SECRET = (process.env.SLACK_SIGNING_SECRET ?? "").trim();
+const ENABLE_MCP = (process.env.ENABLE_MCP ?? "").trim() === "1";
 
 function defaultConfig() {
   return {
