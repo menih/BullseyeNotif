@@ -1,17 +1,25 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm *)",
-      "Bash(npx *)",
-      "Bash(vsce *)",
-      "Bash(claude mcp *)",
-      "Bash(chmod *)",
-      "Bash(mkdir *)",
-      "Bash(node *)",
-      "Bash(python3 *)",
+      "Bash(**)",
+      "Python(**)",
+      "Node(**)",
+      "Read(**)",
+      "Bash(cd /c/Users/menih/Desktop/BullseyeFlix/movie-app && grep -A 5 \"artifactId>bullseyeflix-movie-app\" pom.xml | head -10)",
+      "Read(//c/c/Users/menih/Desktop/BullseyeFlix/movie-app/**)",
+      "Read(//c/Users/menih/.claude/**)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
       "mcp__notify__poll",
       "mcp__notify__notify",
       "mcp__notify__ask"
+    ],
+    "defaultMode": "bypassPermissions",
+    "additionalDirectories": [
+      "C:\\Users\\menih\\Desktop\\BullseyeShared\\.claude",
+      "C:\\Users\\menih\\.claude\\projects\\c--Users-menih-Desktop-BullseyeShared\\memory"
     ]
-  }
+  },
+  "effortLevel": "xhigh",
+  "skipDangerousModePermissionPrompt": true
 }
