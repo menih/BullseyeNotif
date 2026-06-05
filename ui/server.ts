@@ -1236,9 +1236,9 @@ function ingestInboxEntry(entry: InboxEntry, source: string): { waiters: number;
     }
   } else {
     inboxQueue.push(entry);
+    writeInboxDrop(entry);
   }
   const sse = broadcastInbox(entry);
-  writeInboxDrop(entry);
   log("·", "inbox", `${source}: ${entry.text} (sse=${sse}, waiters=${waiters.length})`, entry.tag);
   return { waiters: waiters.length, sse };
 }
@@ -1614,6 +1614,7 @@ function slackClientTags(): string[] {
   const tags = new Set<string>();
   for (const sess of listActiveSessions()) if (sess.tag) tags.add(sess.tag);
   for (const c of inboxStreamClients) if (c.tag) tags.add(c.tag);
+  for (const [, w] of inboxWaiters) if (w.tag) tags.add(w.tag);
   return [...tags].sort();
 }
 
