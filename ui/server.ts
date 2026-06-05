@@ -1673,6 +1673,7 @@ async function pollSlackOnce(token: string, channel: string): Promise<void> {
       await slackPost("ack");
     } else {
       ingestInboxEntry({ text, ts: new Date().toISOString(), origin: "slack" }, "slack");
+      await slackPost("ack");
     }
   }
   const newest = all.reduce((acc, m) => (Number(m.ts) > Number(acc || 0) ? String(m.ts) : acc), slackCursor);

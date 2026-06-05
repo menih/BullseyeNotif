@@ -12,8 +12,8 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 💬 VSC auto-reply | 🟠 P1 | [#20](#20-vsc-agent-auto-reply-in-channel--m--p1) (M) | 90% |  | Delivery PROVEN no-nudge (Stop hook); reply+TTS live. Final: Meni posts @tag to confirm full loop. |
 | 🖥 Client identity | 🟠 P1 | [#15](#15-machine-name-in-client-list--xs--p1) (XS) | 0% | 🚧 window reload | Machine name `<hostname>-<vsc-id>` in client list. |
+| 🛠 Bus polish | 🟢 P3 | [#21](#21-bus-polish--worker-auto-start--tts-voice--s--p3) (S) | 0% |  | Worker auto-start on boot + spoken voice says the real text. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -30,15 +30,11 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #20 VSC agent auto-reply in-channel · M · P1
+### #21 Bus polish — worker auto-start + TTS voice · S · P3
 
-**Problem.** A channel-directed message (`@<client> do X`) reaches the agent inbox but the agent doesn't auto-reply in the channel — user sees nothing back. The earlier "pong" was MANUAL (Claude saw Meni's "crickets" nudge), not automatic.
+**Scope.** (a) Auto-start `notify-watch.sh` on boot (Windows scheduled task / startup entry) so the responder survives reboots without a manual `nohup`. (b) The spoken voice currently says the canned `/api/test/tts` demo phrase ("this is a voice test") — point the worker at the real speak path so the VOICE says the actual text (the Slack reply text + Windows notification are already correct).
 
-**Done so far (≈75%).** (a) **Delivery fixed** — `.claude/notify-inbox-drain.sh` now derives this session's real tag `<hostname>-<vsc-id>` (was hardcoded `claude-code`), so `@2`/`@dell-xps-claude-code` drops actually surface (verified: this-tag + untagged surface, wrong-tag ignored). (b) **Reply path** — Slack inbox entries tagged `origin:"slack"`; `writeInboxDrop` embeds a reply-curl instruction; new `POST /api/agent/slack/reply {text,tag}` posts `[@<tag>] …` to the channel (verified `{ok:true}` + channel post). (c) Bus ACK now says "they'll reply here when done".
-
-**Remaining.** Latency: an ACTIVE agent auto-replies at its next Stop-hook turn boundary (≤~60s); an IDLE agent needs `notify-watch.sh` running (the host-agnostic external waker). End-to-end live demo: Meni posts `@2 <task>` → surfaces here → agent posts `[@…] <result>`.
-
-**Acceptance.** `@dell-xps-claude-code <task>` → bus ACK "dispatched" → agent later `[@…] <result>` with no manual nudge.
+**Acceptance.** Worker runs after a reboot with no manual launch; spoken voice matches the reply text.
 
 ---
 
@@ -57,6 +53,13 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-05 02:45 — #20 VSC agent auto-reply — SOLVED via detached worker (P1)
+
+**Solved** the Slack→agent→reply loop. Root insight (Meni): the long-poll CANNOT live in the interactive agent or a hook — that blocks the prompt — so the responder is a STANDALONE detached process: [notify-watch.sh](notify-watch.sh) long-polls `GET /api/agent/inbox/wait` (plain HTTP, no MCP) and per message answers `*time*` directly (+TTS) or hands to a headless `claude -p` that replies via `POST /api/agent/slack/reply`. **Cleared 3 masking bugs:** killed 7 zombie `slack-poll.sh`/`notify-watch.sh` (dup/steal), restricted the drain hook to `Stop`/`UserPromptSubmit` (PreToolUse/PostToolUse delete-without-deliver, CC #24788/#55889), re-added `ENABLE_MCP=1` to the relaunch. **Refined:** brief `ack` (tagged+untagged, no echo, no double "caught" line), `clients` command, `slackClientTags` counts worker waiters (so `@N` resolves to it), `ingestInboxEntry` file-drops only when no waiter (no double-handling). Architecture → [claude.app.md](claude.app.md).
+**Verify.** LIVE with Meni: "Use speech to say current time" → reply in ~2s ("The current time is 07:28 PM" + Windows notif); "What's your name?" → headless agent answered ~18s; "ping"→"pong". Meni verbatim: *"ITS WORKING!!! I got immediate response!!!"*. Interactive prompt never blocked (separate process). Follow-up polish → #21.
 
 ---
 
