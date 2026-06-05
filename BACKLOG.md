@@ -37,6 +37,16 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### 2026-06-05 13:34 — #21 runtime missing piece fixed: no-admin Startup fallback
+
+**Fixed.** Updated [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) `install` path to auto-fallback when `schtasks /Create` returns `Access is denied`: it now writes `BullseyeNotify Bus Watchdog.cmd` into the user Startup folder (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`) so boot auto-start works without Task Scheduler create rights.
+
+**Also added.** `status` now reports both task and startup-fallback states; `remove` now removes both task entry and startup fallback.
+
+**Verify.** On this machine: `bash scripts/bus-startup-task.sh install` showed scheduler denial then installed startup fallback; `bash scripts/bus-startup-task.sh status` reported `startup_fallback: present` with file path `C:\Users\menih\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\BullseyeNotify Bus Watchdog.cmd`.
+
+---
+
 ### 2026-06-05 13:31 — #15 client identity done + #21 boot-persistence done (disclosed)
 
 **Fixed #15.** Updated `NOTIFY_MCP_TAG` in `C:\Users\menih\.claude.json` from `claude-code` to `bullseyenotify`.
