@@ -27,7 +27,7 @@ log "watchdog started — singleton, sole manager of :3737 + notify-watch (lenie
 FAILS=0
 while true; do
   CUR_BUILD="$(stat -c %Y dist/ui/server.js 2>/dev/null)"
-  if curl -s -o /dev/null --max-time 4 http://localhost:3737/v1/health 2>/dev/null; then
+  if netstat -ano 2>/dev/null | grep ':3737' | grep -q 'LISTENING'; then
     FAILS=0
     if [ -z "$RUN_BUILD" ]; then
       RUN_BUILD="$CUR_BUILD"
@@ -36,7 +36,7 @@ while true; do
     fi
   else
     FAILS=$((FAILS + 1))
-    log "health fail ($FAILS/2)"
+    log "port :3737 not listening ($FAILS/2)"
     [ "$FAILS" -ge 2 ] && { start_server; FAILS=0; }
   fi
   if ! ps -ef 2>/dev/null | grep -qE 'bash (\./)?notify-watch\.sh *$'; then
