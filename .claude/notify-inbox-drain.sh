@@ -18,6 +18,12 @@ PAYLOAD="$(cat 2>/dev/null)"
 EVENT="$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null)"
 [ -z "$EVENT" ] && EVENT="UserPromptSubmit"
 
+# Report this session busy/idle to the bus so it can say "Claude is busy" + ETA.
+# Folded in here (an already-active hook) so it works with no window reload.
+case "$EVENT" in Stop) _BUSY=false ;; *) _BUSY=true ;; esac
+curl -s --max-time 2 -X POST http://localhost:3737/api/session/state \
+  -H 'Content-Type: application/json' -d "{\"tag\":\"$TAG\",\"busy\":$_BUSY}" >/dev/null 2>&1 &
+
 # Consume ONLY on events whose hook output Claude Code actually surfaces:
 # UserPromptSubmit + SessionStart inject additionalContext; Stop delivers via
 # decision:block. PreToolUse/PostToolUse output is DISCARDED (#24788/#55889) —
