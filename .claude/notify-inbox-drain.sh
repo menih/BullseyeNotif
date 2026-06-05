@@ -22,7 +22,7 @@ EVENT="$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null)
 # Folded in here (an already-active hook) so it works with no window reload.
 case "$EVENT" in Stop) _BUSY=false ;; *) _BUSY=true ;; esac
 curl -s --max-time 2 -X POST http://localhost:3737/api/session/state \
-  -H 'Content-Type: application/json' -d "{\"tag\":\"$TAG\",\"busy\":$_BUSY}" >/dev/null 2>&1 &
+  -H 'Content-Type: application/json' -d "{\"tag\":\"$TAG\",\"busy\":$_BUSY}" >/dev/null 2>&1
 
 # Consume ONLY on events whose hook output Claude Code actually surfaces:
 # UserPromptSubmit + SessionStart inject additionalContext; Stop delivers via

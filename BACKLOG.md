@@ -12,8 +12,8 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 🖥 Client identity | 🟠 P1 | [#15](#15-machine-name-in-client-list--xs--p1) (XS) | 0% | 🚧 window reload | Machine name `<hostname>-<vsc-id>` in client list. |
-| 🛠 Bus polish | 🟢 P3 | [#21](#21-bus-polish--worker-auto-start--tts-voice--s--p3) (S) | 0% |  | Worker auto-start on boot + spoken voice says the real text. |
+| 🖥 Client identity | 🟠 P1 | [#15](#15-machine-name-in-client-list--xs--p1) (XS) | 60% | 🚧 window reload | Name from workspace folder — override at `.claude.json:914`; reload to apply. |
+| 🛠 Bus polish | 🟢 P3 | [#21](#21-bus-polish--worker-auto-start--tts-voice--s--p3) (S) | 60% |  | TTS-real-text + worker auto-start (watchdog) done; boot-persistence remains. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -30,19 +30,23 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #21 Bus polish — worker auto-start + TTS voice · S · P3
+### #21 Bus polish — boot-persistence · S · P3
 
-**Scope.** (a) Auto-start `notify-watch.sh` on boot (Windows scheduled task / startup entry) so the responder survives reboots without a manual `nohup`. (b) The spoken voice currently says the canned `/api/test/tts` demo phrase ("this is a voice test") — point the worker at the real speak path so the VOICE says the actual text (the Slack reply text + Windows notification are already correct).
+**Done.** (a) Worker auto-start — the `bus-up.sh` watchdog (#22) keeps `notify-watch.sh` alive while it runs. (b) TTS voice — `/api/test/tts` now speaks the provided text (#24), so the spoken words match the request.
 
-**Acceptance.** Worker runs after a reboot with no manual launch; spoken voice matches the reply text.
+**Remaining.** Boot-persistence: a Windows logon scheduled task that launches `bus-up.sh` on startup, so the whole bus (server + worker + watchdog) survives a reboot with no manual launch.
+
+**Acceptance.** After a reboot, the bus is up with no manual command.
 
 ---
 
-### #15 Machine name in client list · XS · P1 · 🚧 window reload
+### #15 Meaningful client name from workspace folder · XS · P1 · 🚧 window reload
 
-**Problem.** `list clients` shows `claude-code`, not `dell-xps-claude-code`. The bridge identity fix (`src/index.ts` → `<hostname>-<vsc-id>`) is compiled but the running bridge keeps its old tag until the Claude Code window reloads.
+**Problem.** `list clients` shows `dell-xps-claude-code` because the bridge's `VSC_ID` is forced to `claude-code` by a hardcoded `"NOTIFY_MCP_TAG": "claude-code"` in the MCP registration (`~/.claude.json:914`). The bridge already falls back to the workspace folder name (`src/index.ts:37`, `basename(cwd)`), so removing/replacing the override yields a workspace-meaningful name (`dell-xps-bullseyenotify`).
 
-**Acceptance.** After window reload, `list clients` shows `dell-xps-claude-code`.
+**Scope.** Remove the `NOTIFY_MCP_TAG` override (or set it to the workspace folder) in `~/.claude.json`; the bridge re-registers `<hostname>-<workspace-folder>` on reconnect.
+
+**Acceptance.** After window reload, `list clients` shows a workspace-meaningful name.
 
 ---
 
@@ -53,6 +57,27 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-05 03:39 — #24 Permission-prompt prevention + bus UX refinements + raw-passthrough mandate
+
+**Fixed prompts:** `"Bash(**)"` is invalid for command matching (per claude-code-guide — `**` only matches file paths) → changed to `"Bash"` in `~/.claude/settings.json` + [.claude/settings.json](.claude/settings.json), allowing all bash in default mode (only `cd`+`git` in one compound still prompts — avoided). **Raw passthrough (Meni mandate, verbatim:** *"anything I ask AI to do MUST be passed RAW without any interpretations, conversion, transitions"*): deleted the hardcoded `*time*` fast-path in [notify-watch.sh](notify-watch.sh) — every message now goes RAW to the headless `claude -p`; the headless agent is told to NEVER call `notify`/`ask` (its only output is the slack/reply curl) to cut extra Slack posts. **TTS fix:** [ui/server.ts:388](ui/server.ts) `/api/test/tts` speaks the provided `text` (was hardcoded "this is a voice test"). **UX:** brief `ack` (tagged+untagged, no echo, no double "caught" line); `clients` command; `slackClientTags` counts long-poll waiters so `@N` resolves the worker; `ingestInboxEntry` file-drops only when no waiter (no double-handling). **Desktop notif diagnosis:** notify-mcp's desktop is gated off (`enableDesktop=false`, [ui/server.ts:860](ui/server.ts)) — the toasts are SLACK's own app notifications; fix is mute/mentions-only in Slack, not code.
+**Verify.** Both settings show `"Bash"`; worker raw passthrough + `bus-worker caught` removed (grep=0); TTS uses body text; live bus answered injects.
+
+---
+
+### 2026-06-05 03:39 — #23 Busy-state detection reported in the bus ack
+
+**Added** (Meni: *"MCP must detect prompt business BEFORE sending command and report it back as part of ack"*) `POST /api/session/state {tag,busy}` + `sessionBusy`/`sessionBusyNote`/`busyEtaSecs` in [ui/server.ts](ui/server.ts): a tagged dispatch ack shows "🔧 Claude @tag is busy (Xs) … ~ETA" when that session is busy, else "ack". The interactive session reports busy/idle by a `curl /api/session/state` folded into the already-active [.claude/notify-inbox-drain.sh](.claude/notify-inbox-drain.sh) (busy on every event, idle on Stop) — works with NO window reload (a standalone `session-state.sh` hook would need one). ETA = rolling average of recent busy spans.
+**Verify.** Endpoint returns `{ok:true,busy:true}`; busy note wired into dispatch. **Live ack-shows-busy confirmation pending** Meni posting while a turn is in flight.
+
+---
+
+### 2026-06-05 03:39 — #22 Bus self-healing watchdog (independence from the interactive session)
+
+**Added** [bus-up.sh](bus-up.sh) — a detached **singleton** watchdog (PID-file guarded) that is the SOLE manager of the `:3737` server + `notify-watch.sh` worker, so the bus survives the interactive session being blocked/prompted (Meni: *"when prompt takes place … the whole notification business comes to a screeching halt"*). Uses a **port-listening** liveness check (HTTP-health gave false negatives that killed healthy servers → restart loop), acts only after 2 consecutive failures, relaunches with `ENABLE_MCP=1`, and **auto-redeploys on a new build** (dist mtime) so `npm run build` deploys with no manual relaunch/race.
+**Verify.** Watched live: server PID stable, NO restart loop after the port-listening fix; killing the server → watchdog relaunched it; `bus-up.log` clean.
 
 ---
 
