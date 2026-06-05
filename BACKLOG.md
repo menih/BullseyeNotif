@@ -13,7 +13,7 @@
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
 | 🖥 Client identity | 🟠 P1 | [#15](#15-machine-name-in-client-list--xs--p1) (XS) | 60% | 🚧 window reload | Name from workspace folder — override at `.claude.json:914`; reload to apply. |
-| 🛠 Bus polish | 🟢 P3 | [#21](#21-bus-polish--worker-auto-start--tts-voice--s--p3) (S) | 60% |  | TTS-real-text + worker auto-start (watchdog) done; boot-persistence remains. |
+| 🛠 Bus polish | 🟢 P3 | [#21](#21-bus-polish--worker-auto-start--tts-voice--s--p3) (S) | 90% | 🚧 schtasks denied in this shell | Startup-task installer shipped; one-time task registration remains. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -34,7 +34,9 @@ _(empty — only Meni places rows here)_
 
 **Done.** (a) Worker auto-start — the `bus-up.sh` watchdog (#22) keeps `notify-watch.sh` alive while it runs. (b) TTS voice — `/api/test/tts` now speaks the provided text (#24), so the spoken words match the request.
 
-**Remaining.** Boot-persistence: a Windows logon scheduled task that launches `bus-up.sh` on startup, so the whole bus (server + worker + watchdog) survives a reboot with no manual launch.
+**Done (this turn).** Added [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) with `install|status|run|remove` actions. It resolves Windows-safe paths (`cygpath -d`), disables Git-Bash slash conversion (`MSYS_NO_PATHCONV=1`), and registers an ONLOGON task that launches [bus-up.sh](bus-up.sh).
+
+**Remaining.** Run one successful `install` in a shell that has Task Scheduler create rights, then reboot-check. In this session, `schtasks /Create` is denied (`ERROR: Access is denied.`) even for a minimal test task, so registration could not be completed here.
 
 **Acceptance.** After a reboot, the bus is up with no manual command.
 
@@ -57,6 +59,16 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-05 05:52 — #21 Boot-persistence installer script + Task Scheduler diagnostics
+
+**Added** [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) to make startup persistence repeatable from bash: `install`, `status`, `run`, `remove` for the `BullseyeNotify Bus Watchdog` logon task that launches [bus-up.sh](bus-up.sh).
+
+**Fixed** two scheduling pitfalls discovered live: Git-Bash was rewriting `/Create` (`MSYS_NO_PATHCONV=1` added), and `schtasks /TR` parsing failed with spaced paths (switched to DOS short paths via `cygpath -d`).
+
+**Verify.** `bash scripts/bus-startup-task.sh install` reaches Windows Task Scheduler correctly but returns `ERROR: Access is denied.` in this shell; independent control check `schtasks /Create ... "BN-Test-Task" ...` returns the same denial. **Not verified — needs one external step:** run `bash scripts/bus-startup-task.sh install` from a shell/account with task-create rights, then `bash scripts/bus-startup-task.sh status` and reboot-check bus auto-start.
 
 ---
 

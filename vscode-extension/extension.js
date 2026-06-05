@@ -14,6 +14,9 @@
 const vscode = require("vscode");
 const { spawn } = require("child_process");
 const http = require("http");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 
 let uiProcess = null;
 let statusBarItem = null;
@@ -36,7 +39,8 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("omniNotifyMcp.openSettings", openSettings),
     vscode.commands.registerCommand("omniNotifyMcp.openHelp", openHelp),
-    vscode.commands.registerCommand("omniNotifyMcp.startServer", startServer)
+    vscode.commands.registerCommand("omniNotifyMcp.startServer", startServer),
+    vscode.commands.registerCommand("omniNotifyMcp.configureClaude", () => configureClaudeMcp({ showResult: true }))
   );
 
   // ── Auto-start ──────────────────────────────────────────────────────────
@@ -49,9 +53,10 @@ function activate(context) {
   const KEY = "omniNotifyMcp.welcomed";
   if (!context.globalState.get(KEY)) {
     context.globalState.update(KEY, true);
+    configureClaudeMcp({ showResult: false });
     vscode.window
       .showInformationMessage(
-        "Omni Notify MCP installed. Run `npx omni-notify-mcp` once to start the config UI, then add the server to your `.vscode/mcp.json`.",
+        "Omni Notify MCP installed. Claude MCP config was auto-checked. Open Settings to configure channels.",
         "Open Setup Help",
         "Open Settings UI"
       )
@@ -156,6 +161,70 @@ function startServer() {
   });
   vscode.window.showInformationMessage(`Starting Omni Notify config UI on port ${uiPort()}…`);
   setTimeout(refreshStatus, 2000);
+}
+
+function configureClaudeMcp({ showResult }) {
+  const claudePath = path.join(os.homedir(), ".claude.json");
+  const desiredNotify = {
+    type: "stdio",
+    command: "npx",
+    args: ["-y", "omni-notify-mcp"],
+  };
+
+  try {
+    let root = {};
+    if (fs.existsSync(claudePath)) {
+      const raw = fs.readFileSync(claudePath, "utf8");
+      root = raw.trim() ? JSON.parse(raw) : {};
+    }
+    if (!root || typeof root !== "object" || Array.isArray(root)) {
+      throw new Error("~/.claude.json root is not an object");
+    }
+
+    if (!root.mcpServers || typeof root.mcpServers !== "object" || Array.isArray(root.mcpServers)) {
+      root.mcpServers = {};
+    }
+
+    const existing = root.mcpServers.notify;
+    const alreadyDesired = !!existing
+      && existing.type === desiredNotify.type
+      && existing.command === desiredNotify.command
+      && Array.isArray(existing.args)
+      && existing.args.length === desiredNotify.args.length
+      && existing.args.every((v, i) => v === desiredNotify.args[i]);
+
+    if (alreadyDesired) {
+      if (showResult) {
+        vscode.window.showInformationMessage("Claude MCP already configured for Omni Notify.");
+      }
+      return;
+    }
+
+    if (existing && !alreadyDesired) {
+      if (showResult) {
+        vscode.window.showWarningMessage(
+          "Claude already has a custom notify MCP entry. Left unchanged.",
+          "Open ~/.claude.json"
+        ).then((choice) => {
+          if (choice === "Open ~/.claude.json") {
+            vscode.workspace.openTextDocument(vscode.Uri.file(claudePath)).then(vscode.window.showTextDocument);
+          }
+        });
+      }
+      return;
+    }
+
+    root.mcpServers.notify = desiredNotify;
+    fs.writeFileSync(claudePath, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+
+    if (showResult) {
+      vscode.window.showInformationMessage("Configured Claude MCP for Omni Notify in ~/.claude.json.");
+    }
+  } catch (err) {
+    if (showResult) {
+      vscode.window.showErrorMessage(`Failed to configure Claude MCP: ${err.message}`);
+    }
+  }
 }
 
 module.exports = { activate, deactivate };
