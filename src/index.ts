@@ -27,13 +27,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
+import { hostname } from "os";
 import { fileURLToPath } from "url";
 import { z } from "zod";
 
 const PORT = process.env.NOTIFY_MCP_PORT ? parseInt(process.env.NOTIFY_MCP_PORT) : 3737;
 const BASE = `http://localhost:${PORT}`;
-const SESSION_TAG = (process.env.NOTIFY_MCP_TAG ?? "").toLowerCase().replace(/[^a-z0-9_-]/g, "") || undefined;
+const VSC_ID = (process.env.NOTIFY_MCP_TAG || basename(process.cwd())).toLowerCase().replace(/[^a-z0-9_-]/g, "");
+const SESSION_TAG = `${hostname().toLowerCase().replace(/[^a-z0-9_-]/g, "")}-${VSC_ID}`;
 const CLIENT_NAME = "claude-channel-bridge";
 
 // ── 1. Ensure the HTTP server is up ───────────────────────────────────────────
