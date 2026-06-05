@@ -5,6 +5,7 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 SECRETS="$(cd "$(dirname "$0")" && pwd)/notify-secrets.json"
 TOKEN="${SLACK_BOT_TOKEN:-}"; CHANNEL="${SLACK_CHANNEL_ID:-}"
 [ -z "$TOKEN" ] && [ -f "$SECRETS" ] && TOKEN="$(jq -r '.slack.botToken // empty' "$SECRETS")"
+[ -z "$TOKEN" ] && [ -f "$SECRETS" ] && TOKEN="$(jq -r '.slack.botToken_b64 // empty' "$SECRETS" | base64 -d 2>/dev/null)"
 [ -z "$CHANNEL" ] && [ -f "$SECRETS" ] && CHANNEL="$(jq -r '.slack.channelId // empty' "$SECRETS")"
 BASE="${NOTIFY_MCP_BASE:-http://localhost:3737}"
 INTERVAL="${SLACK_POLL_INTERVAL:-2}"
@@ -18,6 +19,7 @@ log "channel=$CHANNEL every ${INTERVAL}s -> $BASE"
 
 slack_post() {
   local hook; hook="$(jq -r '.slack.webhookUrl // empty' "$SECRETS" 2>/dev/null || true)"
+  [ -z "$hook" ] && hook="$(jq -r '.slack.webhookUrl_b64 // empty' "$SECRETS" 2>/dev/null | base64 -d 2>/dev/null || true)"
   [ -z "$hook" ] && hook="$(jq -r '.slack.webhookUrl // empty' "$HOME/.notify-mcp/config.json" 2>/dev/null || true)"
   [ -n "$hook" ] && curl -s -X POST "$hook" -H 'Content-Type: application/json' --data "$(jq -nc --arg t "$1" '{text:$t}')" >/dev/null
 }
