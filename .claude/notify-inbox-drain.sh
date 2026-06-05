@@ -18,6 +18,16 @@ PAYLOAD="$(cat 2>/dev/null)"
 EVENT="$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null)"
 [ -z "$EVENT" ] && EVENT="UserPromptSubmit"
 
+# Consume ONLY on events whose hook output Claude Code actually surfaces:
+# UserPromptSubmit + SessionStart inject additionalContext; Stop delivers via
+# decision:block. PreToolUse/PostToolUse output is DISCARDED (#24788/#55889) —
+# draining there deletes the drop without delivering it. Skip them so the next
+# Stop (fires at every turn end) delivers the message intact.
+case "$EVENT" in
+  UserPromptSubmit|Stop|SessionStart) ;;
+  *) exit 0 ;;
+esac
+
 [ -d "$INBOX" ] || exit 0
 shopt -s nullglob
 
