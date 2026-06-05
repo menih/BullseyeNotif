@@ -13,21 +13,10 @@ slack_reply() {
 }
 
 handle_msg() {
-  local msg="$1" lc
-  lc="$(printf '%s' "$msg" | tr 'A-Z' 'a-z')"
-  case "$lc" in
-    *time*)
-      local now; now="$(date '+%I:%M %p')"
-      curl -s -X POST "$BASE/api/test/tts" -H 'Content-Type: application/json' \
-        -d "$(jq -nc --arg t "The current time is $now" '{text:$t}')" >/dev/null
-      slack_reply "The current time is $now. (Handled by the detached bus-worker — your interactive window was never blocked.)"
-      ;;
-    *)
-      ( cd "$(mktemp -d 2>/dev/null || echo /tmp)" && timeout 150 claude -p \
-        "A user sent this task via the Slack bus: \"$msg\". Do it concisely, then post the result back to them by running exactly: curl -s -X POST $BASE/api/agent/slack/reply -H 'Content-Type: application/json' -d '{\"text\":\"<your result>\",\"tag\":\"$TAG\"}'" \
-        >/dev/null 2>&1 ) &
-      ;;
-  esac
+  local msg="$1"
+  ( cd "$(mktemp -d 2>/dev/null || echo /tmp)" && timeout 150 claude -p \
+    "A user sent this via the Slack bus: \"$msg\". Do EXACTLY what they ask — follow every detail literally, with no conversion or substitution. Do NOT call the notify, ask, or any notification/MCP tool — your ONE AND ONLY output channel is the curl below. If they ask you to say/speak something ALOUD, speak it by running: curl -s -X POST $BASE/api/test/tts -H 'Content-Type: application/json' -d '{\"text\":\"<exact words>\"}' . Post your text answer back by running exactly once: curl -s -X POST $BASE/api/agent/slack/reply -H 'Content-Type: application/json' -d '{\"text\":\"<your answer>\",\"tag\":\"$TAG\"}'" \
+    >/dev/null 2>&1 ) &
 }
 
 echo "[notify-watch] $(date '+%H:%M:%S') started — $BASE tag=$TAG long-poll=${SECS}s"
