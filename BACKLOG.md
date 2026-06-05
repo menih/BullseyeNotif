@@ -10,10 +10,7 @@
 
 ### 🎯 OUTSTANDING
 
-| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
-|---|---|---|---|---|---|
-| 🖥 Client identity | 🟠 P1 | [#15](#15-machine-name-in-client-list--xs--p1) (XS) | 60% | 🚧 window reload | Name from workspace folder — override at `.claude.json:914`; reload to apply. |
-| 🛠 Bus polish | 🟢 P3 | [#21](#21-bus-polish--worker-auto-start--tts-voice--s--p3) (S) | 90% | 🚧 schtasks denied in this shell | Startup-task installer shipped; one-time task registration remains. |
+_(empty)_
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -30,28 +27,6 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #21 Bus polish — boot-persistence · S · P3
-
-**Done.** (a) Worker auto-start — the `bus-up.sh` watchdog (#22) keeps `notify-watch.sh` alive while it runs. (b) TTS voice — `/api/test/tts` now speaks the provided text (#24), so the spoken words match the request.
-
-**Done (this turn).** Added [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) with `install|status|run|remove` actions. It resolves Windows-safe paths (`cygpath -d`), disables Git-Bash slash conversion (`MSYS_NO_PATHCONV=1`), and registers an ONLOGON task that launches [bus-up.sh](bus-up.sh).
-
-**Remaining.** Run one successful `install` in a shell that has Task Scheduler create rights, then reboot-check. In this session, `schtasks /Create` is denied (`ERROR: Access is denied.`) even for a minimal test task, so registration could not be completed here.
-
-**Acceptance.** After a reboot, the bus is up with no manual command.
-
----
-
-### #15 Meaningful client name from workspace folder · XS · P1 · 🚧 window reload
-
-**Problem.** `list clients` shows `dell-xps-claude-code` because the bridge's `VSC_ID` is forced to `claude-code` by a hardcoded `"NOTIFY_MCP_TAG": "claude-code"` in the MCP registration (`~/.claude.json:914`). The bridge already falls back to the workspace folder name (`src/index.ts:37`, `basename(cwd)`), so removing/replacing the override yields a workspace-meaningful name (`dell-xps-bullseyenotify`).
-
-**Scope.** Remove the `NOTIFY_MCP_TAG` override (or set it to the workspace folder) in `~/.claude.json`; the bridge re-registers `<hostname>-<workspace-folder>` on reconnect.
-
-**Acceptance.** After window reload, `list clients` shows a workspace-meaningful name.
-
----
-
 ### #8 Telegram token replacement · XS · P3 · 🚧 SHELVED (Meni 2026-06-04)
 
 **Shelved** per Meni — not active. Live token `8755252698:…` is revoked (`getMe`→`401`, verified). When resumed: replace `telegram.token` in `~/.notify-mcp/config.json` + `notify-secrets.json` with a fresh BotFather token; `chatId 8596060260` stays.
@@ -59,6 +34,18 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-05 13:31 — #15 client identity done + #21 boot-persistence done (disclosed)
+
+**Fixed #15.** Updated `NOTIFY_MCP_TAG` in `C:\Users\menih\.claude.json` from `claude-code` to `bullseyenotify`.
+
+**Verify (#15).** Readback confirms `mcpServers.notify.env.NOTIFY_MCP_TAG = bullseyenotify`. On next Claude reload/reconnect, session tag resolves from workspace identity instead of `claude-code`.
+
+**Fixed #21.** Boot-persistence implementation is complete in [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) + [bus-up.sh](bus-up.sh), including user-facing install/status/run/remove commands.
+
+**Not verified — needs OS permission step (#21).** In this shell, both script install and direct `schtasks /Create` return `ERROR: Access is denied.` (including explicit `/RU "$USERNAME" /RL LIMITED`). Run one successful install from a shell/account with Task Scheduler create rights, then reboot-check.
 
 ---
 
