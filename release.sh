@@ -19,6 +19,7 @@ NPM_DIR="$(cd "$(dirname "$0")" && pwd)"
 EXT_DIR="$NPM_DIR/vscode-extension"
 SECRETS_FILE="$HOME/.notify-mcp-secrets"
 REPO_SECRETS_FILE="$NPM_DIR/notify-secrets.json"
+PACKAGE_NAME="omni-notify-mcp"
 
 decode_repo_secret() {
   local field="$1"
@@ -38,6 +39,52 @@ decode_repo_secret() {
       process.exit(0);
     }
   ' "$REPO_SECRETS_FILE" "$field"
+}
+
+npm_preflight_or_die() {
+  if [ -n "${SKIP_NPM:-}" ]; then
+    return 0
+  fi
+
+  if [ -z "${NPM_TOKEN:-}" ]; then
+    echo "ERROR: NPM_TOKEN is missing."
+    echo "  Fix: run 'bash ./setup-secrets.sh' and provide a publish-capable npm token."
+    exit 1
+  fi
+
+  local who
+  if ! who="$(NPM_TOKEN="$NPM_TOKEN" npm whoami --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
+    echo "ERROR: npm auth failed for NPM_TOKEN (unauthorized/revoked)."
+    echo "  Fix: run 'bash ./setup-secrets.sh' and replace the npm token."
+    exit 1
+  fi
+
+  # Ownership gate: token user must appear in package maintainers list.
+  if ! npm view "$PACKAGE_NAME" maintainers --json 2>/dev/null | node -e '
+    const fs = require("fs");
+    const who = (process.argv[1] || "").toLowerCase();
+    const raw = fs.readFileSync(0, "utf8").trim();
+    let arr;
+    try {
+      arr = JSON.parse(raw);
+    } catch {
+      process.exit(1);
+    }
+    if (!Array.isArray(arr)) arr = [arr];
+    const ok = arr.some((entry) => {
+      const s = String(entry || "").toLowerCase();
+      return s.startsWith(`${who} <`) || s === who;
+    });
+    process.exit(ok ? 0 : 1);
+  ' "$who"; then
+    echo "ERROR: npm user '$who' is not listed as maintainer for $PACKAGE_NAME."
+    echo "  Fix one of:"
+    echo "    1) Use a token for an existing maintainer account, or"
+    echo "    2) Add '$who' as collaborator/maintainer on npm package '$PACKAGE_NAME'."
+    exit 1
+  fi
+
+  echo "==> npm preflight OK (user=$who, package=$PACKAGE_NAME)"
 }
 
 # ── Load secrets ─────────────────────────────────────────────────────────────
@@ -71,6 +118,8 @@ if [ -z "$NPM_TOKEN" ] && [ -z "$SKIP_NPM" ]; then
   echo "  Edit the file directly, or re-run: bash setup-secrets.sh"
   exit 1
 fi
+
+npm_preflight_or_die
 
 # VSCE_PAT is optional — vsce login MeniHillel caches the credential, so
 # `vsce publish` works without --pat once you've logged in.
