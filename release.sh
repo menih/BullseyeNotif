@@ -18,6 +18,27 @@ set -e
 NPM_DIR="$(cd "$(dirname "$0")" && pwd)"
 EXT_DIR="$NPM_DIR/vscode-extension"
 SECRETS_FILE="$HOME/.notify-mcp-secrets"
+REPO_SECRETS_FILE="$NPM_DIR/notify-secrets.json"
+
+decode_repo_secret() {
+  local field="$1"
+  if [ ! -f "$REPO_SECRETS_FILE" ]; then
+    return 0
+  fi
+  node -e '
+    const fs = require("fs");
+    const p = process.argv[1];
+    const f = process.argv[2];
+    try {
+      const j = JSON.parse(fs.readFileSync(p, "utf8"));
+      const v = j?.release?.[f];
+      if (typeof v !== "string" || !v.trim()) { process.exit(0); }
+      process.stdout.write(Buffer.from(v, "base64").toString("utf8"));
+    } catch {
+      process.exit(0);
+    }
+  ' "$REPO_SECRETS_FILE" "$field"
+}
 
 # ── Load secrets ─────────────────────────────────────────────────────────────
 # Tokens persist in ~/.notify-mcp-secrets so you set them once and never type
@@ -34,6 +55,15 @@ fi
 if [ -f "$SECRETS_FILE" ]; then
   # shellcheck disable=SC1090
   set -a; source "$SECRETS_FILE"; set +a
+fi
+
+# Repo fallback: if release creds are committed in notify-secrets.json under
+# release.{npmToken_b64,vscePat_b64}, use them when local secrets are absent.
+if [ -z "${NPM_TOKEN:-}" ]; then
+  NPM_TOKEN="$(decode_repo_secret npmToken_b64 || true)"
+fi
+if [ -z "${VSCE_PAT:-}" ]; then
+  VSCE_PAT="$(decode_repo_secret vscePat_b64 || true)"
 fi
 
 if [ -z "$NPM_TOKEN" ] && [ -z "$SKIP_NPM" ]; then
