@@ -385,7 +385,8 @@ app.post("/api/test/tts", async (req, res) => {
       (typeof req.body?.voice === "string" && req.body.voice) ||
       cfg.desktop?.ttsVoice ||
       "en-US-AndrewMultilingualNeural";
-    await speakText("Notification from Claude. This is a voice test.", voice);
+    const text = (typeof req.body?.text === "string" && req.body.text.trim()) || "Notification from Claude. This is a voice test.";
+    await speakText(text, voice);
     res.json({ ok: true, message: `TTS played (${voice})` });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
