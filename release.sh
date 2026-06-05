@@ -20,6 +20,7 @@ EXT_DIR="$NPM_DIR/vscode-extension"
 SECRETS_FILE="$HOME/.notify-mcp-secrets"
 REPO_SECRETS_FILE="$NPM_DIR/notify-secrets.json"
 PACKAGE_NAME="omni-notify-mcp"
+MARKETPLACE_ITEM="MeniHillel.omni-notify-mcp"
 
 decode_repo_secret() {
   local field="$1"
@@ -166,17 +167,93 @@ const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 p.version = process.env.NEW_VER;
 fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
 EOF
+
+  ORIG_EXT_NAME="$(node -p "require('./package.json').name")"
+  ORIG_DISPLAY_NAME="$(node -p "require('./package.json').displayName")"
+  EXT_PUBLISHER="$(node -p "require('./package.json').publisher")"
+
+  set_ext_identity() {
+    local next_name="$1"
+    local next_display="${2:-}"
+    NEXT_NAME="$next_name" NEXT_DISPLAY="$next_display" node <<'EOF'
+const fs = require('fs');
+const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+p.name = process.env.NEXT_NAME;
+if (process.env.NEXT_DISPLAY) p.displayName = process.env.NEXT_DISPLAY;
+fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+EOF
+  }
+
+  # Optional explicit override key. If unset, release will auto-fallback on
+  # Marketplace name collisions to <name>-<publisher>.
+  if [ -n "${VSCE_NAME_OVERRIDE:-}" ] && [ "$VSCE_NAME_OVERRIDE" != "$ORIG_EXT_NAME" ]; then
+    echo "==> Applying VSCE_NAME_OVERRIDE: $VSCE_NAME_OVERRIDE"
+    set_ext_identity "$VSCE_NAME_OVERRIDE"
+  fi
+
   rm -f *.vsix
 
   echo "==> Publishing extension to VS Code marketplace..."
   # `--no-update-package-json` keeps vsce from auto-bumping again on top of
   # our explicit version. `--skip-license` not used — we ship a real LICENSE.
+  VSCE_LOG="$NPM_DIR/.run/vsce-publish.log"
+  mkdir -p "$NPM_DIR/.run"
   if [ -n "$VSCE_PAT" ]; then
-    vsce publish --pat "$VSCE_PAT" --no-update-package-json "$NEW_VERSION"
+    if ! vsce publish --pat "$VSCE_PAT" --no-update-package-json "$NEW_VERSION" >"$VSCE_LOG" 2>&1; then
+      cat "$VSCE_LOG"
+      if grep -qi "already exists in the Marketplace" "$VSCE_LOG"; then
+        CUR_EXT_NAME="$(node -p "require('./package.json').name")"
+        FALLBACK_EXT_NAME="${VSCE_NAME_OVERRIDE:-${ORIG_EXT_NAME}-$(printf '%s' "$EXT_PUBLISHER" | tr '[:upper:]' '[:lower:]')}"
+        FALLBACK_EXT_NAME="$(printf '%s' "$FALLBACK_EXT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+        if [ "$FALLBACK_EXT_NAME" = "$CUR_EXT_NAME" ]; then
+          FALLBACK_EXT_NAME="${CUR_EXT_NAME}-alt"
+        fi
+        FALLBACK_DISPLAY_NAME="${ORIG_DISPLAY_NAME} (${EXT_PUBLISHER})"
+        echo "==> Marketplace name collision — overriding extension name to: $FALLBACK_EXT_NAME"
+        set_ext_identity "$FALLBACK_EXT_NAME" "$FALLBACK_DISPLAY_NAME"
+        rm -f *.vsix
+        vsce publish --pat "$VSCE_PAT" --no-update-package-json "$NEW_VERSION"
+      elif grep -qi "display name is taken" "$VSCE_LOG"; then
+        CUR_EXT_NAME="$(node -p "require('./package.json').name")"
+        UNIQUE_DISPLAY_NAME="${ORIG_DISPLAY_NAME} (${EXT_PUBLISHER} ${NEW_VERSION})"
+        echo "==> Marketplace display-name collision — overriding displayName to: $UNIQUE_DISPLAY_NAME"
+        set_ext_identity "$CUR_EXT_NAME" "$UNIQUE_DISPLAY_NAME"
+        rm -f *.vsix
+        vsce publish --pat "$VSCE_PAT" --no-update-package-json "$NEW_VERSION"
+      else
+        exit 1
+      fi
+    fi
   else
-    vsce publish --no-update-package-json "$NEW_VERSION"
+    if ! vsce publish --no-update-package-json "$NEW_VERSION" >"$VSCE_LOG" 2>&1; then
+      cat "$VSCE_LOG"
+      if grep -qi "already exists in the Marketplace" "$VSCE_LOG"; then
+        CUR_EXT_NAME="$(node -p "require('./package.json').name")"
+        FALLBACK_EXT_NAME="${VSCE_NAME_OVERRIDE:-${ORIG_EXT_NAME}-$(printf '%s' "$EXT_PUBLISHER" | tr '[:upper:]' '[:lower:]')}"
+        FALLBACK_EXT_NAME="$(printf '%s' "$FALLBACK_EXT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+        if [ "$FALLBACK_EXT_NAME" = "$CUR_EXT_NAME" ]; then
+          FALLBACK_EXT_NAME="${CUR_EXT_NAME}-alt"
+        fi
+        FALLBACK_DISPLAY_NAME="${ORIG_DISPLAY_NAME} (${EXT_PUBLISHER})"
+        echo "==> Marketplace name collision — overriding extension name to: $FALLBACK_EXT_NAME"
+        set_ext_identity "$FALLBACK_EXT_NAME" "$FALLBACK_DISPLAY_NAME"
+        rm -f *.vsix
+        vsce publish --no-update-package-json "$NEW_VERSION"
+      elif grep -qi "display name is taken" "$VSCE_LOG"; then
+        CUR_EXT_NAME="$(node -p "require('./package.json').name")"
+        UNIQUE_DISPLAY_NAME="${ORIG_DISPLAY_NAME} (${EXT_PUBLISHER} ${NEW_VERSION})"
+        echo "==> Marketplace display-name collision — overriding displayName to: $UNIQUE_DISPLAY_NAME"
+        set_ext_identity "$CUR_EXT_NAME" "$UNIQUE_DISPLAY_NAME"
+        rm -f *.vsix
+        vsce publish --no-update-package-json "$NEW_VERSION"
+      else
+        exit 1
+      fi
+    fi
   fi
-  echo "    OK marketplace: MeniHillel.omni-notify-mcp@$NEW_VERSION"
+  FINAL_EXT_NAME="$(node -p "require('./package.json').name")"
+  MARKETPLACE_ITEM="${EXT_PUBLISHER}.${FINAL_EXT_NAME}"
+  echo "    OK marketplace: ${EXT_PUBLISHER}.${FINAL_EXT_NAME}@$NEW_VERSION"
   cd "$NPM_DIR"
 elif [ -n "$SKIP_VSCE" ]; then
   echo "==> SKIP_VSCE set — skipping marketplace publish"
@@ -189,7 +266,7 @@ echo "==========================================================================
 echo ""
 echo "  Live links:"
 echo "    npm:         https://www.npmjs.com/package/omni-notify-mcp"
-echo "    marketplace: https://marketplace.visualstudio.com/items?itemName=MeniHillel.omni-notify-mcp"
+echo "    marketplace: https://marketplace.visualstudio.com/items?itemName=${MARKETPLACE_ITEM}"
 echo "    github:      https://github.com/menih/notify-mcp"
 echo ""
 echo "  (Marketplace takes ~2-5 min to reindex — refresh in a bit.)"
@@ -209,7 +286,7 @@ Install:   npx omni-notify-mcp
 VS Code:   search "Omni Notify" in extensions
 
 📦 https://www.npmjs.com/package/omni-notify-mcp
-🛒 https://marketplace.visualstudio.com/items?itemName=MeniHillel.omni-notify-mcp
+🛒 https://marketplace.visualstudio.com/items?itemName=${MARKETPLACE_ITEM}
 
 EOF
 echo "--------------------------------------------------------------------------------"
@@ -224,7 +301,7 @@ Install:   npx omni-notify-mcp
 VS Code:   search "Omni Notify" in extensions
 
 📦 https://www.npmjs.com/package/omni-notify-mcp
-🛒 https://marketplace.visualstudio.com/items?itemName=MeniHillel.omni-notify-mcp
+🛒 https://marketplace.visualstudio.com/items?itemName=${MARKETPLACE_ITEM}
 EOF
 )
 
