@@ -1634,7 +1634,7 @@ async function handleSlackCommand(lc: string): Promise<boolean> {
     return true;
   }
   if (lc === "help" || lc === "commands" || lc === "?") {
-    await slackPost("Commands: `list clients`. Direct a client: `@<name> your message` or `#<id> your message`.");
+    await slackPost("Commands: `clients`. Direct: `@<name> msg`, `#<id> msg`, or untagged → broadcast to all.");
     return true;
   }
   return false;
@@ -1669,7 +1669,7 @@ async function pollSlackOnce(token: string, channel: string): Promise<void> {
         continue;
       }
       ingestInboxEntry({ text: msg, ts: new Date().toISOString(), tag, origin: "slack" }, "slack");
-      await slackPost(`✓ dispatched to @${tag}: "${msg}" — they'll reply here when done`);
+      await slackPost("ack");
     } else {
       ingestInboxEntry({ text, ts: new Date().toISOString(), origin: "slack" }, "slack");
     }

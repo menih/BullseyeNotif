@@ -12,7 +12,7 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 💬 VSC auto-reply | 🟠 P1 | [#20](#20-vsc-agent-auto-reply-in-channel--m--p1) (M) | 25% |  | Agent must AUTO-reply in-channel <60s after dispatch — loop still manual. |
+| 💬 VSC auto-reply | 🟠 P1 | [#20](#20-vsc-agent-auto-reply-in-channel--m--p1) (M) | 90% |  | Delivery PROVEN no-nudge (Stop hook); reply+TTS live. Final: Meni posts @tag to confirm full loop. |
 | 🖥 Client identity | 🟠 P1 | [#15](#15-machine-name-in-client-list--xs--p1) (XS) | 0% | 🚧 window reload | Machine name `<hostname>-<vsc-id>` in client list. |
 
 ### 🔄 ONGOING
