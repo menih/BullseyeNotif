@@ -1348,6 +1348,45 @@ app.post("/api/agent/slack/reply", (req, res) => {
   res.json({ ok: true });
 });
 
+// Interactive-session busy/idle, reported by that session's hooks (busy on
+// UserPromptSubmit/PreToolUse/PostToolUse, idle on Stop). Lets the bus tell the
+// user "Claude is busy" + a rough ETA when a request lands on a busy prompt.
+const sessionBusy: Record<string, { busy: boolean; since: number }> = {};
+const busyDurations: number[] = [];
+
+function setSessionState(tag: string, busy: boolean): void {
+  const prev = sessionBusy[tag];
+  if (busy) {
+    if (!prev?.busy) sessionBusy[tag] = { busy: true, since: Date.now() };
+  } else {
+    if (prev?.busy) {
+      busyDurations.push(Date.now() - prev.since);
+      if (busyDurations.length > 20) busyDurations.shift();
+    }
+    sessionBusy[tag] = { busy: false, since: 0 };
+  }
+}
+
+function busyEtaSecs(): number | null {
+  if (!busyDurations.length) return null;
+  return Math.round(busyDurations.reduce((a, b) => a + b, 0) / busyDurations.length / 1000);
+}
+
+function sessionBusyNote(tag: string): string {
+  const s = sessionBusy[tag];
+  if (!s?.busy) return "";
+  const secs = Math.round((Date.now() - s.since) / 1000);
+  const eta = busyEtaSecs();
+  return `🔧 Claude @${tag} is busy right now (working ${secs}s) — your request is queued and runs the moment the prompt is free.${eta ? ` Turns here usually finish in ~${eta}s.` : ""}`;
+}
+
+app.post("/api/session/state", (req, res) => {
+  const tag = req.body?.tag ? String(req.body.tag).toLowerCase() : undefined;
+  if (!tag) { res.status(400).json({ error: "tag required" }); return; }
+  setSessionState(tag, req.body?.busy === true || req.body?.busy === "true");
+  res.json({ ok: true, busy: sessionBusy[tag]?.busy ?? false });
+});
+
 // Slack Events API (inbound). Requires configuring your Slack app with an
 // Event Request URL: POST /api/slack/events.
 app.post("/api/slack/events", (req, res) => {
@@ -1670,7 +1709,7 @@ async function pollSlackOnce(token: string, channel: string): Promise<void> {
         continue;
       }
       ingestInboxEntry({ text: msg, ts: new Date().toISOString(), tag, origin: "slack" }, "slack");
-      await slackPost("ack");
+      await slackPost(sessionBusyNote(tag) || "ack");
     } else {
       ingestInboxEntry({ text, ts: new Date().toISOString(), origin: "slack" }, "slack");
       await slackPost("ack");
