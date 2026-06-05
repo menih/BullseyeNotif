@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
 set -u
 export MSYS_NO_PATHCONV=1
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT"
-mkdir -p .run
+ROOT="$(cd "$(dirname "$0")" && pwd)"; cd "$ROOT"; mkdir -p .run
 log() { echo "[bus-up $(date '+%H:%M:%S')] $*" >> .run/bus-up.log; }
-log "watchdog started (keeps :3737 server + notify-watch worker alive, independent of any interactive session)"
+
+RUN_BUILD=""
+start_server() {
+  local p
+  p="$(netstat -ano 2>/dev/null | grep ':3737' | grep LISTENING | awk '{print $5}' | head -1)"
+  [ -n "$p" ] && taskkill //F //PID "$p" >/dev/null 2>&1
+  sleep 1
+  ENABLE_MCP=1 nohup node dist/ui/server.js > .run/server.log 2>&1 &
+  RUN_BUILD="$(stat -c %Y dist/ui/server.js 2>/dev/null)"
+  log "server (re)started (build=$RUN_BUILD)"
+  sleep 3
+}
+
+log "watchdog started — sole manager of :3737 server + notify-watch worker (auto-redeploys on new build)"
 while true; do
+  CUR_BUILD="$(stat -c %Y dist/ui/server.js 2>/dev/null)"
   if ! curl -s -o /dev/null --max-time 3 http://localhost:3737/v1/health 2>/dev/null; then
-    ENABLE_MCP=1 nohup node dist/ui/server.js > .run/server.log 2>&1 &
-    log "server was DOWN — relaunched (ENABLE_MCP=1)"
-    sleep 4
+    log "server DOWN"
+    start_server
+  elif [ -n "$CUR_BUILD" ] && [ -n "$RUN_BUILD" ] && [ "$CUR_BUILD" != "$RUN_BUILD" ]; then
+    log "new build detected — redeploying"
+    start_server
+  elif [ -z "$RUN_BUILD" ]; then
+    RUN_BUILD="$CUR_BUILD"
   fi
   if ! ps -ef 2>/dev/null | grep -qE 'bash (\./)?notify-watch\.sh *$'; then
     nohup bash notify-watch.sh > .run/notify-watch.log 2>&1 &
-    log "worker was DOWN — relaunched"
+    log "worker (re)started"
   fi
-  sleep 15
+  sleep 5
 done
