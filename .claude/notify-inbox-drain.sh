@@ -8,7 +8,11 @@
 # PostToolUse is deliberately NOT used: its context-injection is broken in
 # Claude Code (issues #24788 / #55889 — additionalContext is dropped).
 INBOX="$HOME/.notify-mcp/inbox"
-TAG="claude-code"
+# This session's tag = <hostname>-<vsc-id>, mirroring src/index.ts SESSION_TAG so
+# drops the bus routes to this VSC (e.g. dell-xps-claude-code) actually surface.
+_host="$(hostname 2>/dev/null | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]//g')"
+_vsc="$(printf '%s' "${NOTIFY_MCP_TAG:-claude-code}" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]//g')"
+TAG="${_host}-${_vsc}"
 
 PAYLOAD="$(cat 2>/dev/null)"
 EVENT="$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null)"

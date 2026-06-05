@@ -7,9 +7,6 @@
       "Read(**)",
       "Edit(**)",
       "Write(**)",
-      "Bash(cd /c/Users/menih/Desktop/BullseyeFlix/movie-app && grep -A 5 \"artifactId>bullseyeflix-movie-app\" pom.xml | head -10)",
-      "Read(//c/c/Users/menih/Desktop/BullseyeFlix/movie-app/**)",
-      "Read(//c/Users/menih/.claude/**)",
       "Skill(update-config)",
       "Skill(update-config:*)",
       "mcp__notify__poll",
@@ -26,25 +23,84 @@
   "skipDangerousModePermissionPrompt": true,
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/sync-shared.sh\"", "timeout": 30 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/sync-shared.sh\"",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "UserPromptSubmit": [
-      { "hooks": [
-        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 10 },
-        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"", "timeout": 10 }
-      ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "PreToolUse": [
-      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 10 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "Stop": [
-      { "hooks": [
-        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"", "timeout": 15 },
-        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"", "timeout": 10 }
-      ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/rules.sh\"",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/notify-inbox-drain.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

@@ -1071,7 +1071,7 @@ function getLocalIp() {
 
 // ── Ask / reply + inbox system ────────────────────────────────────────────────
 
-interface InboxEntry { text: string; ts: string; messageId?: number; tag?: string }
+interface InboxEntry { text: string; ts: string; messageId?: number; tag?: string; origin?: string }
 
 const pendingAsks = new Map<string, { resolve: (v: string) => void; timer: NodeJS.Timeout; tag?: string }>();
 const inboxQueue: InboxEntry[] = [];
@@ -1171,8 +1171,11 @@ function writeInboxDrop(entry: InboxEntry): void {
     const header = `# Unsolicited user message\n\n` +
       `- Time: ${entry.ts}\n` +
       (entry.tag ? `- Tag: @${entry.tag}\n` : "") +
-      `- Origin: user (out-of-band)\n\n`;
-    writeFileSync(path, header + entry.text + "\n");
+      `- Origin: ${entry.origin ?? "user"} (out-of-band)\n\n`;
+    const replyHint = entry.origin === "slack"
+      ? `\n---\n↩ This arrived over the Slack bus — the user is WAITING in the channel. Reply there ASAP when done:\n\`\`\`\ncurl -s -X POST http://localhost:${PORT}/api/agent/slack/reply -H 'Content-Type: application/json' -d '{"text":"YOUR ANSWER","tag":"${entry.tag ?? ""}"}'\n\`\`\`\n`
+      : "";
+    writeFileSync(path, header + entry.text + "\n" + replyHint);
   } catch (err) {
     log("·", "inbox-drop", `write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -1333,6 +1336,16 @@ app.post("/api/agent/inbox/inject", (req, res) => {
   const entry: InboxEntry = { text, ts: new Date().toISOString(), tag };
   const out = ingestInboxEntry(entry, "agent-inject");
   res.json({ ok: true, waiters: out.waiters, sse: out.sse });
+});
+
+app.post("/api/agent/slack/reply", (req, res) => {
+  if (!requireAgentAuth(req, res)) return;
+  const text = String(req.body?.text ?? "").trim();
+  if (!text) { res.status(400).json({ error: "text required" }); return; }
+  const tag = req.body?.tag ? String(req.body.tag).toLowerCase() : undefined;
+  slackPost(tag ? `[@${tag}] ${text}` : text);
+  log("→", "slack:reply", text, tag);
+  res.json({ ok: true });
 });
 
 // Slack Events API (inbound). Requires configuring your Slack app with an
@@ -1655,10 +1668,10 @@ async function pollSlackOnce(token: string, channel: string): Promise<void> {
         log("←", "slack", `unknown client: ${handle}`);
         continue;
       }
-      ingestInboxEntry({ text: msg, ts: new Date().toISOString(), tag }, "slack");
-      await slackPost(`✓ dispatched to @${tag}: "${msg}"`);
+      ingestInboxEntry({ text: msg, ts: new Date().toISOString(), tag, origin: "slack" }, "slack");
+      await slackPost(`✓ dispatched to @${tag}: "${msg}" — they'll reply here when done`);
     } else {
-      ingestInboxEntry({ text, ts: new Date().toISOString() }, "slack");
+      ingestInboxEntry({ text, ts: new Date().toISOString(), origin: "slack" }, "slack");
     }
   }
   const newest = all.reduce((acc, m) => (Number(m.ts) > Number(acc || 0) ? String(m.ts) : acc), slackCursor);
