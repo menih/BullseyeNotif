@@ -1554,6 +1554,140 @@ async function startTelegramListener() {
   }
 }
 
+// ── Slack inbound poller (always-on; folds slack-poll.sh → #16) ────────────────
+const SLACK_SECRETS_PATH = join(fileURLToPath(new URL("../../notify-secrets.json", import.meta.url)));
+
+function decodeB64Fields(obj: any): any {
+  if (Array.isArray(obj)) return obj.map(decodeB64Fields);
+  if (obj && typeof obj === "object") {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k.endsWith("_b64") && typeof v === "string") out[k.slice(0, -4)] = Buffer.from(v, "base64").toString("utf8");
+      else out[k] = decodeB64Fields(v);
+    }
+    return out;
+  }
+  return obj;
+}
+
+function loadSecrets(): Record<string, any> {
+  if (!existsSync(SLACK_SECRETS_PATH)) return {};
+  try {
+    return decodeB64Fields(JSON.parse(readFileSync(SLACK_SECRETS_PATH, "utf8")));
+  } catch (err) {
+    log("·", "secrets", `load failed: ${err instanceof Error ? err.message : String(err)}`);
+    return {};
+  }
+}
+
+function slackCreds(): { token?: string; channel?: string; webhook?: string } {
+  const s = loadSecrets().slack ?? {};
+  const cfgSlack = loadConfig().slack ?? {};
+  const token = (process.env.SLACK_BOT_TOKEN ?? s.botToken ?? "").trim() || undefined;
+  const channel = (process.env.SLACK_CHANNEL_ID ?? s.channelId ?? "").trim() || undefined;
+  const webhook = (s.webhookUrl ?? cfgSlack.webhookUrl ?? "").trim() || undefined;
+  return { token, channel, webhook };
+}
+
+async function slackPost(text: string): Promise<void> {
+  const { webhook } = slackCreds();
+  if (!webhook) return;
+  try {
+    await fetch(webhook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  } catch { /* webhook post is best-effort */ }
+}
+
+function slackClientTags(): string[] {
+  const tags = new Set<string>();
+  for (const sess of listActiveSessions()) if (sess.tag) tags.add(sess.tag);
+  for (const c of inboxStreamClients) if (c.tag) tags.add(c.tag);
+  return [...tags].sort();
+}
+
+function slackClientsNumbered(): string {
+  const tags = slackClientTags();
+  return tags.length ? tags.map((t, i) => `${i + 1}. ${t}`).join("\n") : "(none connected)";
+}
+
+function resolveSlackClient(handle: string): string | undefined {
+  const tags = slackClientTags();
+  if (/^[0-9]+$/.test(handle)) return tags[parseInt(handle, 10) - 1];
+  return tags.find(t => t === handle);
+}
+
+async function handleSlackCommand(lc: string): Promise<boolean> {
+  if (lc === "list clients" || lc === "clients" || lc === "list") {
+    await slackPost(`Connected clients — reply @<name> or #<id>:\n${slackClientsNumbered()}`);
+    return true;
+  }
+  if (lc === "help" || lc === "commands" || lc === "?") {
+    await slackPost("Commands: `list clients`. Direct a client: `@<name> your message` or `#<id> your message`.");
+    return true;
+  }
+  return false;
+}
+
+let slackCursor = "";
+let slackConsecutiveErrors = 0;
+
+async function pollSlackOnce(token: string, channel: string): Promise<void> {
+  const url = `https://slack.com/api/conversations.history?channel=${encodeURIComponent(channel)}&oldest=${encodeURIComponent(slackCursor)}&limit=50`;
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
+  const json = await r.json() as any;
+  if (!json.ok) throw new Error(`conversations.history: ${json.error ?? "unknown"}`);
+  const all: any[] = json.messages ?? [];
+  const human = all
+    .filter(m => !m.subtype && !m.bot_id && !m.app_id && m.user && String(m.text ?? "").trim())
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+  for (const m of human) {
+    const text = String(m.text ?? "");
+    const stripped = text.replace(/<@[A-Za-z0-9]+>/g, "");
+    const lc = stripped.toLowerCase().trim();
+    if (await handleSlackCommand(lc)) { log("←", "slack:cmd", lc); continue; }
+    const clean = stripped.replace(/^\s+/, "");
+    const routed = clean.match(/^[@#]([^\s]+)\s+([\s\S]*)$/);
+    if (routed) {
+      const handle = routed[1];
+      const msg = routed[2];
+      const tag = resolveSlackClient(handle);
+      if (!tag) {
+        await slackPost(`❌ Unknown client "${handle}". Connected:\n${slackClientsNumbered()}`);
+        log("←", "slack", `unknown client: ${handle}`);
+        continue;
+      }
+      ingestInboxEntry({ text: msg, ts: new Date().toISOString(), tag }, "slack");
+      await slackPost(`✓ dispatched to @${tag}: "${msg}"`);
+    } else {
+      ingestInboxEntry({ text, ts: new Date().toISOString() }, "slack");
+    }
+  }
+  const newest = all.reduce((acc, m) => (Number(m.ts) > Number(acc || 0) ? String(m.ts) : acc), slackCursor);
+  if (newest) slackCursor = newest;
+}
+
+async function startSlackListener() {
+  const interval = (Number(process.env.SLACK_POLL_INTERVAL) || 2) * 1000;
+  while (true) {
+    try {
+      const { token, channel } = slackCreds();
+      if (!token || !channel) { await new Promise(r => setTimeout(r, 5000)); continue; }
+      if (!slackCursor) {
+        slackCursor = String(Math.floor(Date.now() / 1000) - 300);
+        log("·", "slack", `listener ready, channel=${channel}, backfill=300s (closes restart gap)`);
+      }
+      await pollSlackOnce(token, channel);
+      if (slackConsecutiveErrors > 0) { log("·", "slack", `recovered after ${slackConsecutiveErrors} attempt(s)`); slackConsecutiveErrors = 0; }
+      await new Promise(r => setTimeout(r, interval));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes("terminated") && !msg.includes("aborted")) log("·", "slack:error", msg);
+      slackConsecutiveErrors++;
+      const delay = Math.min(60_000, 2000 * Math.pow(2, Math.min(5, slackConsecutiveErrors - 1)));
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 app.get("/reply/:token", (req, res) => {
   const pending = pendingAsks.get(req.params.token);
   res.send(`<!DOCTYPE html><html><head><title>Reply to Claude</title>
@@ -2294,6 +2428,7 @@ const httpServer = app.listen(PORT, "0.0.0.0", () => {
     console.log("  MCP endpoint (remote)    → disabled (set ENABLE_MCP=1 to enable)\n");
   }
   startTelegramListener();
+  startSlackListener();
   open(`http://localhost:${PORT}`).catch(() => {});
 });
 
