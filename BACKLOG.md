@@ -37,6 +37,14 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### 2026-06-08 12:52 — #27 deleted banned pure-logic test (§7.0)
+
+**Deleted** `tests/notification-engine.test.mjs` — a pure-function test (`computeDesktopOnlyMode` + hand-built fixtures + `assertEquals`, no real boundary), banned by §7.0 (Meni 2026-06-04: only integration tests). `computeDesktopOnlyMode` stays — it is production logic ([notificationEngine.ts:84](ui/messaging/notificationEngine.ts#L84)); only the useless test goes. The real integration coverage ([tests/smoke.test.mjs](tests/smoke.test.mjs) — spawns a live server + bridge, wire-level) is kept.
+
+**Verify.** `node --test tests/smoke.test.mjs` runs the remaining integration suite (result below in the same turn).
+
+---
+
 ### 2026-06-08 12:45 — #25 client names by folder/workspace, never "claude-code"
 
 **Root cause (no AI naming exists).** Bus tags are `<hostname>-<vsc-id>`. The visible `dell-xps-claude-code` came from [notify-watch.sh](notify-watch.sh) — the headless auto-responder hardcoded its suffix `${_host}-claude-code`. **Fixed:** derives the suffix from the responder's own project folder → `dell-xps-bullseyenotify-bot` (workspace-aligned, distinct from the interactive bridge so tagged routing to `@bullseyenotify` still reaches the window, no collision). **Also hardened** the bridge ([src/index.ts](src/index.ts)): `deriveVscId()` skips a denylist of generic launcher/tool/system dirs (`claude-code`, `claude`, `code`, `cursor`, `vscode`, `bin`, `dist`, `src`, `node_modules`, …) and walks up to the nearest meaningful folder when `NOTIFY_MCP_TAG` is unset.
