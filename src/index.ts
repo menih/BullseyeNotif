@@ -34,7 +34,32 @@ import { z } from "zod";
 
 const PORT = process.env.NOTIFY_MCP_PORT ? parseInt(process.env.NOTIFY_MCP_PORT) : 3737;
 const BASE = `http://localhost:${PORT}`;
-const VSC_ID = (process.env.NOTIFY_MCP_TAG || basename(process.cwd())).toLowerCase().replace(/[^a-z0-9_-]/g, "");
+const CLEAN_ID = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+
+// NOTIFY_MCP_TAG is the explicit per-window name; otherwise use the nearest
+// meaningful working-dir folder, skipping generic launcher/tool/system dirs so a
+// bridge spawned from an editor's launch dir names itself after the project
+// (e.g. "bullseyenotify"), never the host ("claude-code").
+function deriveVscId(): string {
+  const explicit = CLEAN_ID(process.env.NOTIFY_MCP_TAG ?? "");
+  if (explicit) return explicit;
+  const generic = new Set([
+    "claude-code", "claude", "code", "cursor", "vscode", "windsurf",
+    "bin", "dist", "build", "src", "out", "node_modules",
+    "windows", "system32", "users", "appdata", "roaming", "local", "programs", "temp", "tmp",
+  ]);
+  let dir = process.cwd();
+  for (let i = 0; i < 5; i++) {
+    const name = CLEAN_ID(basename(dir));
+    if (name && !generic.has(name)) return name;
+    const parent = dirname(dir);
+    if (!parent || parent === dir) break;
+    dir = parent;
+  }
+  return CLEAN_ID(basename(process.cwd())) || "agent";
+}
+
+const VSC_ID = deriveVscId();
 const SESSION_TAG = `${hostname().toLowerCase().replace(/[^a-z0-9_-]/g, "")}-${VSC_ID}`;
 const CLIENT_NAME = "claude-channel-bridge";
 

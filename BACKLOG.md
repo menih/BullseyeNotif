@@ -37,6 +37,30 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### 2026-06-08 12:45 — #25 client names by folder/workspace, never "claude-code"
+
+**Root cause (no AI naming exists).** Bus tags are `<hostname>-<vsc-id>`. The visible `dell-xps-claude-code` came from [notify-watch.sh](notify-watch.sh) — the headless auto-responder hardcoded its suffix `${_host}-claude-code`. **Fixed:** derives the suffix from the responder's own project folder → `dell-xps-bullseyenotify-bot` (workspace-aligned, distinct from the interactive bridge so tagged routing to `@bullseyenotify` still reaches the window, no collision). **Also hardened** the bridge ([src/index.ts](src/index.ts)): `deriveVscId()` skips a denylist of generic launcher/tool/system dirs (`claude-code`, `claude`, `code`, `cursor`, `vscode`, `bin`, `dist`, `src`, `node_modules`, …) and walks up to the nearest meaningful folder when `NOTIFY_MCP_TAG` is unset.
+
+**Verify.** `deriveVscId` table: `…/BullseyeNotify`→`bullseyenotify`, `…/BullseyeNotify/dist`→`bullseyenotify` (skips dist), `…/Programs/claude-code`→skips claude-code, explicit tag wins — all pass. Live: `notify-watch.log` → `tag=dell-xps-bullseyenotify-bot`; `server.log` inbox/wait polls now `-bot`; `/api/sessions` SSE tags = only `dell-xps-bullseyenotify`; npx `claude-code` bridge gone. `dist/index.js` carries `deriveVscId`. **Note:** the bridge fix lands for the published `npx` bridge only on a republish (`release.sh`); local `dist` bridges on reload.
+
+---
+
+### 2026-06-08 12:45 — #24 Slack ack only when a live session is listening
+
+**Mandate (Meni):** *"only show [the ack] if there are active sessions with slack. Detect session idle and make sure sessions are expired if there is no activity."* **Fixed** in [ui/server.ts](ui/server.ts): `pollSlackOnce` posted `"ack"` unconditionally — now gated on `liveListenerCount(tag) > 0` (live SSE + parked waiters + MCP sessions) for both tagged and untagged paths; with zero listeners the entry still queues but no misleading ack posts. **Accuracy:** new count helpers call `pruneDeadSessions()` first; `slackClientTags()` now prunes dead MCP sessions + filters dead SSE sockets, so the gate and `list clients` reflect only live agents. The 90s MCP reaper + 15s SSE prune already expire idle sessions; this wires that liveness into the ack decision.
+
+**Verify (verified).** `npm run build` clean; watchdog redeployed `:3737` (PID 4632) on the new build, boots clean (no slack:error/EADDRINUSE in `server.log`); compiled `dist/ui/server.js` carries `liveListenerCount` + both gates (lines 1743/1748). **Operator-verify (disclosed — needs a real channel post in each state):** post in the Slack bus with an agent connected → `ack` appears; disconnect all agents (close the window, wait >90s) and post → no `ack`, message still queued for the next connector.
+
+---
+
+### 2026-06-08 12:45 — #26 notify-watch.sh self-singleton (no double-answers)
+
+**Found while fixing #25.** The watchdog's `ps | grep` dedup ([bus-up.sh:42](bus-up.sh#L42)) races at the 45s long-poll boundary. **Fixed:** [notify-watch.sh](notify-watch.sh) now claims a `.run/notify-watch.pid` singleton (mirrors [bus-up.sh:7-12](bus-up.sh#L7-L12)) and `trap`s cleanup on EXIT; a second launch self-exits.
+
+**Verify (verified).** Forced double-launch: first → `started — tag=dell-xps-bullseyenotify-bot`; second → `another instance alive (…) — exiting`. Steady-state one real responder (the extra `notify-watch.sh`-matching PID is its own read-loop child subshell, parent = the responder — not a duplicate).
+
+---
+
 ### 2026-06-05 13:34 — #21 runtime missing piece fixed: no-admin Startup fallback
 
 **Fixed.** Updated [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) `install` path to auto-fallback when `schtasks /Create` returns `Access is denied`: it now writes `BullseyeNotify Bus Watchdog.cmd` into the user Startup folder (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`) so boot auto-start works without Task Scheduler create rights.

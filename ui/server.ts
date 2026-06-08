@@ -1651,11 +1651,26 @@ async function slackPost(text: string): Promise<void> {
 }
 
 function slackClientTags(): string[] {
+  pruneDeadSessions();
   const tags = new Set<string>();
   for (const sess of listActiveSessions()) if (sess.tag) tags.add(sess.tag);
-  for (const c of inboxStreamClients) if (c.tag) tags.add(c.tag);
+  for (const c of inboxStreamClients) {
+    if (c.res.destroyed || c.res.writableEnded || !c.res.writable) continue;
+    if (c.tag) tags.add(c.tag);
+  }
   for (const [, w] of inboxWaiters) if (w.tag) tags.add(w.tag);
   return [...tags].sort();
+}
+
+// How many live agents would actually receive a message with this tag (undefined
+// = broadcast). Counts live SSE subscribers, parked long-poll waiters, and MCP
+// sessions. Used to gate the Slack ack: a "ack" posted when nobody is connected
+// is a lie — the message only sits queued for the next connector.
+function liveListenerCount(tag: string | undefined): number {
+  pruneDeadSessions();
+  let waiters = 0;
+  for (const [, w] of inboxWaiters) if (!tag || w.tag === tag) waiters++;
+  return sseSubscribersForTag(tag) + waiters + sessionsMatchingTag(tag).length;
 }
 
 function slackClientsNumbered(): string {
@@ -1710,10 +1725,10 @@ async function pollSlackOnce(token: string, channel: string): Promise<void> {
         continue;
       }
       ingestInboxEntry({ text: msg, ts: new Date().toISOString(), tag, origin: "slack" }, "slack");
-      await slackPost(sessionBusyNote(tag) || "ack");
+      if (liveListenerCount(tag) > 0) await slackPost(sessionBusyNote(tag) || "ack");
     } else {
       ingestInboxEntry({ text, ts: new Date().toISOString(), origin: "slack" }, "slack");
-      await slackPost("ack");
+      if (liveListenerCount(undefined) > 0) await slackPost("ack");
     }
   }
   const newest = all.reduce((acc, m) => (Number(m.ts) > Number(acc || 0) ? String(m.ts) : acc), slackCursor);

@@ -3,9 +3,18 @@ set -u
 export MSYS_NO_PATHCONV=1
 BASE="${NOTIFY_MCP_BASE:-http://localhost:3737}"
 _host="$(hostname | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]//g')"
-TAG="${NOTIFY_MCP_TAG:-${_host}-claude-code}"
-SECS="${NOTIFY_POLL_SECS:-45}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+_folder="$(basename "$ROOT" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]//g')"
+TAG="${NOTIFY_MCP_TAG:-${_host}-${_folder}-bot}"
+SECS="${NOTIFY_POLL_SECS:-45}"
+
+mkdir -p "$ROOT/.run"
+PIDFILE="$ROOT/.run/notify-watch.pid"
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+  echo "[notify-watch] another instance alive ($(cat "$PIDFILE")) — exiting"; exit 0
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
 
 slack_reply() {
   curl -s -X POST "$BASE/api/agent/slack/reply" -H 'Content-Type: application/json' \
