@@ -96,6 +96,15 @@ function saveConfig(config: Record<string, any>): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
+function clientAliasMap(): Record<string, string> {
+  const a = loadConfig().clientAliases;
+  return (a && typeof a === "object") ? a : {};
+}
+
+function displayTag(tag: string): string {
+  return clientAliasMap()[tag] || tag;
+}
+
 const MASKED = "••••••••";
 
 function maskSecrets(config: Record<string, any>): Record<string, any> {
@@ -823,6 +832,80 @@ app.get("/api/sessions", (_req, res) => {
 
 app.delete("/api/sessions/:clientId", (_req, res) => {
   res.status(410).json({ error: "session_disconnect_unsupported", message: "HTTP mode does not support remote disconnect." });
+});
+
+// Unified live-client view for the UI "Clients" tab — the same set the Slack
+// `list clients` command reports: tagged MCP sessions + live SSE subscribers +
+// parked long-poll waiters (e.g. the notify-watch responder), aggregated by tag.
+app.get("/api/clients", (_req, res) => {
+  pruneDeadSessions();
+  const now = Date.now();
+  const byTag = new Map<string, { tag: string; kinds: Set<string>; lastSeen: number; host?: string; workspaceName?: string; clientName?: string }>();
+  const touch = (tag: string | undefined, kind: string, lastSeen: number, extra: { host?: string; workspaceName?: string; clientName?: string } = {}) => {
+    if (!tag) return;
+    const cur = byTag.get(tag) ?? { tag, kinds: new Set<string>(), lastSeen: 0 };
+    cur.kinds.add(kind);
+    if (lastSeen > cur.lastSeen) cur.lastSeen = lastSeen;
+    if (!cur.host && extra.host) cur.host = extra.host;
+    if (!cur.workspaceName && extra.workspaceName) cur.workspaceName = extra.workspaceName;
+    if (!cur.clientName && extra.clientName) cur.clientName = extra.clientName;
+    byTag.set(tag, cur);
+  };
+  for (const s of listActiveSessions()) touch(s.tag, "mcp", s.lastSeen, { host: s.host, workspaceName: s.workspaceName, clientName: s.clientName });
+  for (const c of inboxStreamClients) {
+    if (c.res.destroyed || c.res.writableEnded || !c.res.writable) continue;
+    touch(c.tag, "sse", now);
+  }
+  for (const [, w] of inboxWaiters) touch(w.tag, "waiter", now);
+  const clients = [...byTag.values()]
+    .map(c => ({ tag: c.tag, name: displayTag(c.tag), kinds: [...c.kinds], lastSeen: c.lastSeen, host: c.host, workspaceName: c.workspaceName, clientName: c.clientName }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.json({ clients });
+});
+
+// Rename a client → a persisted display alias keyed by the client's self-reported
+// tag. Applied to /api/clients, `list clients`, and @routing. Empty name clears it.
+app.post("/api/clients/:tag/rename", (req, res) => {
+  const tag = String(req.params.tag);
+  const name = String(req.body?.name ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  const cfg = loadConfig();
+  cfg.clientAliases = (cfg.clientAliases && typeof cfg.clientAliases === "object") ? cfg.clientAliases : {};
+  if (name) cfg.clientAliases[tag] = name;
+  else delete cfg.clientAliases[tag];
+  saveConfig(cfg);
+  log("·", "clients", `rename ${tag} → ${name || "(cleared)"}`);
+  res.json({ ok: true, tag, name: name || null });
+});
+
+// Force-reconnect a client: drop every connection carrying its tag — MCP
+// transports (next request 404s → bridge reinitializes), SSE streams (bridge's
+// subscriber reconnects), and parked waiters (long-poll re-issues). All clients
+// reconnect on their own; this just clears stale/ghost state on demand.
+app.post("/api/clients/:tag/reconnect", (req, res) => {
+  const tag = String(req.params.tag);
+  let closed = 0;
+  for (const [sid, meta] of Object.entries(sessions)) {
+    if (meta.tag !== tag) continue;
+    try { httpTransports[sid]?.close(); } catch { /* transport already gone */ }
+    delete httpTransports[sid];
+    delete sessions[sid];
+    closed++;
+  }
+  for (const c of [...inboxStreamClients]) {
+    if (c.tag !== tag) continue;
+    try { c.res.end(); } catch { /* stream already closed */ }
+    inboxStreamClients.delete(c);
+    closed++;
+  }
+  for (const [id, w] of [...inboxWaiters]) {
+    if (w.tag !== tag) continue;
+    clearTimeout(w.timer);
+    w.resolve([]);
+    inboxWaiters.delete(id);
+    closed++;
+  }
+  log("·", "clients", `force-reconnect ${tag} — ${closed} connection(s) dropped`);
+  res.json({ ok: true, tag, closed });
 });
 
 app.get("/api/logs", (req, res) => {
@@ -1675,13 +1758,13 @@ function liveListenerCount(tag: string | undefined): number {
 
 function slackClientsNumbered(): string {
   const tags = slackClientTags();
-  return tags.length ? tags.map((t, i) => `${i + 1}. ${t}`).join("\n") : "(none connected)";
+  return tags.length ? tags.map((t, i) => `${i + 1}. ${displayTag(t)}`).join("\n") : "(none connected)";
 }
 
 function resolveSlackClient(handle: string): string | undefined {
   const tags = slackClientTags();
   if (/^[0-9]+$/.test(handle)) return tags[parseInt(handle, 10) - 1];
-  return tags.find(t => t === handle);
+  return tags.find(t => t === handle || displayTag(t) === handle);
 }
 
 async function handleSlackCommand(lc: string): Promise<boolean> {
@@ -2497,8 +2580,11 @@ const httpServer = app.listen(PORT, "0.0.0.0", () => {
   } else {
     console.log("  MCP endpoint (remote)    → disabled (set ENABLE_MCP=1 to enable)\n");
   }
-  startTelegramListener();
-  startSlackListener();
+  // Live Slack/Telegram pollers hit real external channels — never under test.
+  if (process.env.NOTIFY_MCP_TEST_ENDPOINTS !== "1") {
+    startTelegramListener();
+    startSlackListener();
+  }
   open(`http://localhost:${PORT}`).catch(() => {});
 });
 

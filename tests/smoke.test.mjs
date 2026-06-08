@@ -57,6 +57,8 @@ function startServer(port) {
       ...process.env,
       PORT: String(port),
       NOTIFY_MCP_TEST_ENDPOINTS: "1",
+      // The /mcp transport is gated behind ENABLE_MCP=1; the tests exercise it.
+      ENABLE_MCP: "1",
       // Suppress noise from the auto-open browser call in tests.
       BROWSER: "none",
     },

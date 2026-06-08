@@ -204,6 +204,40 @@ main {
   letter-spacing: .5px;
 }
 
+.log-tabs { display: flex; gap: 2px; flex-shrink: 0; }
+.log-tab {
+  font: inherit; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .5px;
+  padding: 4px 10px; border: none; background: transparent;
+  color: var(--text-3); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px;
+  border-bottom: 2px solid transparent;
+}
+.log-tab:hover { color: var(--text); }
+.log-tab-active { color: var(--text); border-bottom-color: var(--accent); }
+
+.clients-panel { flex: 1; overflow-y: auto; padding: 8px 12px; }
+.client-row {
+  display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap;
+  padding: 8px 10px; margin-bottom: 6px;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.client-tag {
+  font-family: monospace; font-weight: 700; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; flex: 1 1 auto;
+}
+.client-kinds { display: flex; gap: 4px; flex-shrink: 0; }
+.client-kind {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .4px;
+  padding: 2px 6px; border-radius: 6px;
+  background: var(--border); color: var(--text-2);
+}
+.client-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: auto; }
+.client-actions .btn-sm { padding: 3px 9px; font-size: 11px; }
+.client-meta { flex-basis: 100%; color: var(--text-3); font-size: 11px; }
+.clients-empty { color: var(--text-3); text-align: center; padding: 24px 12px; font-size: 12px; }
+
 .session-pills {
   display: flex;
   align-items: center;

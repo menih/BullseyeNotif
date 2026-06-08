@@ -12,15 +12,24 @@ echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
 RUN_BUILD=""
+port_listening() { netstat -ano 2>/dev/null | grep ':3737' | grep -q LISTENING; }
+
 start_server() {
   local p
   p="$(netstat -ano 2>/dev/null | grep ':3737' | grep LISTENING | awk '{print $5}' | head -1)"
-  [ -n "$p" ] && taskkill //F //PID "$p" >/dev/null 2>&1
-  sleep 1
+  # MSYS_NO_PATHCONV=1 is set above, so `//F` is NOT collapsed to `/F` and
+  # taskkill rejects it — use single-slash flags (#30, silent kill failure).
+  [ -n "$p" ] && taskkill /F /PID "$p" >/dev/null 2>&1
+  # taskkill returns before the OS releases the port — relaunching immediately
+  # EADDRINUSE-crashes the new build and the old one keeps serving (#30). Wait
+  # until :3737 is actually free (≤10s) before binding.
+  for _ in $(seq 1 20); do port_listening || break; sleep 0.5; done
   ENABLE_MCP=1 nohup node dist/ui/server.js > .run/server.log 2>&1 &
   RUN_BUILD="$(stat -c %Y dist/ui/server.js 2>/dev/null)"
-  log "server (re)started (build=$RUN_BUILD)"
-  sleep 4
+  # Confirm the relaunch actually bound the port; log loudly if it didn't.
+  local bound=""
+  for _ in $(seq 1 16); do if port_listening; then bound=1; break; fi; sleep 0.5; done
+  if [ -n "$bound" ]; then log "server (re)started (build=$RUN_BUILD)"; else log "server relaunch FAILED to bind :3737 (build=$RUN_BUILD) — see server.log"; fi
 }
 
 log "watchdog started — singleton, sole manager of :3737 + notify-watch (lenient health, auto-redeploy on build)"

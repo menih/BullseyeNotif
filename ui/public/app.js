@@ -804,6 +804,81 @@ async function refreshSessions() {
 setInterval(refreshSessions, 3000);
 refreshSessions();
 
+function selectPanelTab(tab) {
+  document.querySelectorAll(".log-tab").forEach(t => t.classList.toggle("log-tab-active", t.dataset.ptab === tab));
+  const showLog = tab === "log";
+  $("log-panel").style.display = showLog ? "" : "none";
+  $("clients-panel").style.display = showLog ? "none" : "";
+  $("session-pills").style.display = showLog ? "" : "none";
+  const clearBtn = $("clear-log-btn");
+  if (clearBtn) clearBtn.style.display = showLog ? "" : "none";
+  if (!showLog) refreshClients();
+}
+
+function escHtml(s) {
+  return String(s ?? "").replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+}
+
+async function refreshClients() {
+  const panel = $("clients-panel");
+  if (!panel || panel.style.display === "none") return;
+  try {
+    const res = await fetch("/api/clients");
+    if (!res.ok) return;
+    const { clients } = await res.json();
+    if (!clients.length) {
+      panel.innerHTML = `<div class="clients-empty">No clients connected.</div>`;
+      return;
+    }
+    panel.innerHTML = clients.map(c => {
+      const status = sessionStatus(c.lastSeen);
+      const ago = Math.round((Date.now() - c.lastSeen) / 1000);
+      const label = c.name || c.tag;
+      const aliased = c.name && c.name !== c.tag;
+      const kinds = c.kinds.map(k => `<span class="client-kind">${escHtml(k)}</span>`).join("");
+      const where = [aliased ? c.tag : null, c.workspaceName || c.clientName, c.host].filter(Boolean).join(" · ");
+      const tagArg = c.tag.replace(/'/g, "\\'");
+      const labelArg = label.replace(/'/g, "\\'");
+      return `<div class="client-row">
+        <span class="pill-dot pill-dot-${status}"></span>
+        <span class="client-tag" style="color:${clientColor(c.tag)}" title="${escHtml(c.tag)}">${escHtml(label)}</span>
+        <span class="client-kinds">${kinds}</span>
+        <span class="client-actions">
+          <button class="btn btn-sm btn-ghost" onclick="renameClient('${tagArg}','${labelArg}')">Rename</button>
+          <button class="btn btn-sm btn-ghost" onclick="reconnectClient('${tagArg}')">Invalidate</button>
+        </span>
+        <span class="client-meta">${where ? escHtml(where) + " · " : ""}seen ${ago}s ago</span>
+      </div>`;
+    }).join("");
+  } catch { /* ignore */ }
+}
+
+async function renameClient(tag, current) {
+  const name = prompt(`Rename "${tag}"\nLetters, digits, - and _ only. Leave blank to clear the alias.`, current || "");
+  if (name === null) return;
+  try {
+    await fetch(`/api/clients/${encodeURIComponent(tag)}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    toast("Client renamed");
+  } catch { toast("Rename failed", "error"); }
+  refreshClients();
+}
+
+async function reconnectClient(tag) {
+  if (!confirm(`Force "${tag}" to reconnect?\nIt will drop and re-establish its connection within a few seconds.`)) return;
+  try {
+    const res = await fetch(`/api/clients/${encodeURIComponent(tag)}/reconnect`, { method: "POST" });
+    const { closed } = await res.json();
+    toast(`Invalidated ${tag} — ${closed} connection(s) dropped`);
+  } catch { toast("Invalidate failed", "error"); }
+  setTimeout(refreshClients, 1000);
+}
+
+setInterval(refreshClients, 3000);
+
 function clearLog() {
   $("log-panel").innerHTML = "";
 }

@@ -10,7 +10,9 @@
 
 ### 🎯 OUTSTANDING
 
-_(empty)_
+| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
+|---|---|---|---|---|---|
+| 🩺 Bus watchdog | 🟡 P2 | [#30](#30-watchdog-redeploy-eaddrinuse-race--s--p2) (S) | — | | Auto-redeploy on new build races EADDRINUSE — old build keeps serving. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -27,6 +29,14 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### #30 Watchdog redeploy EADDRINUSE race · S · P2
+
+**Observed twice 2026-06-08 while shipping #24/#29.** `bus-up.sh` `start_server` ([bus-up.sh:15-24](bus-up.sh#L15-L24)) kills the `:3737` listener (`taskkill //PID`) then `sleep 1` then relaunches — but the port isn't reliably freed in 1s, so the new build `EADDRINUSE`-crashes and the OLD build keeps serving. Net: "auto-redeploy on new build" (#22) silently no-ops; a manual `taskkill //PID` of the stale listener was needed for the new build to bind. **Fix idea:** after kill, poll until `:3737` is actually free (or the old PID is gone) before relaunch, with a bounded timeout; verify the relaunched server is listening + log if it failed. Not yet implemented.
+
+**Acceptance.** A new build always supersedes the running server with no manual kill; `server.log` shows no `EADDRINUSE` on redeploy.
+
+---
+
 ### #8 Telegram token replacement · XS · P3 · 🚧 SHELVED (Meni 2026-06-04)
 
 **Shelved** per Meni — not active. Live token `8755252698:…` is revoked (`getMe`→`401`, verified). When resumed: replace `telegram.token` in `~/.notify-mcp/config.json` + `notify-secrets.json` with a fresh BotFather token; `chatId 8596060260` stays.
@@ -34,6 +44,36 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-08 13:34 — #31 Clients tab: Rename + Invalidate buttons
+
+**Added** (Meni: *"Add button in clients - 1) rename, 2) invalidate (can we force reconnect?)"*) per-client row buttons. **Yes, force-reconnect works.** **Rename** → `POST /api/clients/:tag/rename {name}` ([ui/server.ts](ui/server.ts)) persists a `clientAliases[tag]=name` map in `~/.notify-mcp/config.json` (survives restart); applied to `/api/clients`, `list clients` (`slackClientsNumbered`), and `resolveSlackClient` (so `@alias` routes to the original tag's subscribers); blank name clears it. **Invalidate** → `POST /api/clients/:tag/reconnect` closes the tag's MCP transports (next request 404s → bridge reinits), ends SSE streams (subscriber reconnects), and resolves waiters (long-poll re-issues) — all auto-reconnect. **UI:** `renameClient`/`reconnectClient` ([app.js](ui/public/app.js), prompt/confirm + toast), button styles ([style.css](ui/public/style.css)).
+
+**Verify (verified).** `curl` cycle: `/api/clients` carries `name`; rename bot→`watch-bot` reflected in `/api/clients` + persisted to `config.json` (`{"dell-xps-bullseyenotify-bot":"watch-bot"}`); reconnect → `{closed:1}`; clear → `{}` on disk (state restored clean). Headless Chrome @390px: 2 Rename + 2 Invalidate buttons render, row layout clean (badges line 1, buttons right, meta line 2), 0 JS errors. Live on `:3737`; ships in npm on next publish.
+
+---
+
+### 2026-06-08 13:25 — #29 "Clients" tab in the web UI
+
+**Added** (Meni: *"add 'clients' tab next to activity logs"*) a **Clients** tab beside Activity Log in the config UI. **New endpoint** `GET /api/clients` ([ui/server.ts](ui/server.ts)) returns the unified live-client set the Slack `list clients` reports — tagged MCP sessions + live SSE subscribers + parked long-poll waiters (incl. the `-bot` responder, which `/api/sessions` misses), aggregated by tag with kinds/host/workspace/lastSeen, after `pruneDeadSessions()`. **UI:** tab switcher ([index.html](ui/public/index.html)), `selectPanelTab`/`refreshClients` with 3s auto-refresh + HTML-escaped rows + per-client status dot/kind badges/tooltip ([app.js](ui/public/app.js)), styles matching the pills/log theme ([style.css](ui/public/style.css)). Fixed an initial CSS bug (tag broke one-char-per-line under `word-break:break-all` in the flex row → `nowrap`+ellipsis+`min-width:0`).
+
+**Verify (verified).** Headless Chrome @390px (mobile, §7.1): tabs render `ACTIVITY LOG | CLIENTS`, 0 JS errors; two rows — `dell-xps-bullseyenotify` (MCP+SSE, bridge·127.0.0.1·seen 0s) and `dell-xps-bullseyenotify-bot` (WAITER) — no `claude-code`, no overflow. `curl /api/clients` returns the same set. Static UI served from `ui/public` (live on `:3737` now); ships in npm package on next publish.
+
+---
+
+### 2026-06-08 13:05 — #28 fixed broken smoke suite (two pre-existing bugs)
+
+**Both root causes pre-existed this turn's product code.** (1) `/mcp` is gated behind `ENABLE_MCP=1` ([ui/server.ts:2350](ui/server.ts#L2350)); the live bus passes it but the test's `startServer` ([tests/smoke.test.mjs](tests/smoke.test.mjs)) didn't → test server 404'd every `/mcp` request → 6/7 failed. **Fixed:** `startServer` launches with `ENABLE_MCP: "1"`. (2) The full server starts the live Slack + Telegram pollers (real creds from `notify-secrets.json`, 300s backfill), so **real channel messages were injected into the test inbox** → `wait_for_inbox` tests (#3/#4) flaked on whatever was in the channel. **Fixed (sim/live separation):** [ui/server.ts](ui/server.ts) skips `startTelegramListener`/`startSlackListener` when `NOTIFY_MCP_TEST_ENDPOINTS=1`. Diagnosed by proving bridge + live server work standalone while the harness failed identically serialized + concurrent (→ config, not regression), then the inbox-only failures pointing at live-poller pollution.
+
+**Verify (verified).** `node --test tests/smoke.test.mjs` → **7/7 pass, 0 fail, EXIT=0**.
+
+---
+
+### 2026-06-08 13:12 — published omni-notify-mcp@1.3.12 (ships the naming fix)
+
+**Published** (Meni: *"publish it"*) via `release.sh` (patch bump 1.3.11→1.3.12): npm `omni-notify-mcp@1.3.12` + marketplace `MeniHillel.omni-notify-mcp-menihillel@1.3.12`, both OK. This carries the #25 bridge `deriveVscId` fix to the published `npx -y omni-notify-mcp` bridge (picked up on its next launch). **Note:** version files (`package.json`, `vscode-extension/package.json`) are bumped + uncommitted — Meni commits.
 
 ---
 
