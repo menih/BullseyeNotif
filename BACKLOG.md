@@ -10,9 +10,7 @@
 
 ### 🎯 OUTSTANDING
 
-| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
-|---|---|---|---|---|---|
-| 🩺 Bus watchdog | 🟡 P2 | [#30](#30-watchdog-redeploy-eaddrinuse-race--s--p2) (S) | — | | Auto-redeploy on new build races EADDRINUSE — old build keeps serving. |
+_(empty)_
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -29,14 +27,6 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #30 Watchdog redeploy EADDRINUSE race · S · P2
-
-**Observed twice 2026-06-08 while shipping #24/#29.** `bus-up.sh` `start_server` ([bus-up.sh:15-24](bus-up.sh#L15-L24)) kills the `:3737` listener (`taskkill //PID`) then `sleep 1` then relaunches — but the port isn't reliably freed in 1s, so the new build `EADDRINUSE`-crashes and the OLD build keeps serving. Net: "auto-redeploy on new build" (#22) silently no-ops; a manual `taskkill //PID` of the stale listener was needed for the new build to bind. **Fix idea:** after kill, poll until `:3737` is actually free (or the old PID is gone) before relaunch, with a bounded timeout; verify the relaunched server is listening + log if it failed. Not yet implemented.
-
-**Acceptance.** A new build always supersedes the running server with no manual kill; `server.log` shows no `EADDRINUSE` on redeploy.
-
----
-
 ### #8 Telegram token replacement · XS · P3 · 🚧 SHELVED (Meni 2026-06-04)
 
 **Shelved** per Meni — not active. Live token `8755252698:…` is revoked (`getMe`→`401`, verified). When resumed: replace `telegram.token` in `~/.notify-mcp/config.json` + `notify-secrets.json` with a fresh BotFather token; `chatId 8596060260` stays.
@@ -44,6 +34,30 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-08 14:03 — #33 integration coverage for clients endpoints
+
+**Added** (§7.5 coverage for #29/#31) 3 integration tests to [tests/smoke.test.mjs](tests/smoke.test.mjs) — real HTTP, no mocks: `/api/clients` lists a tagged session with `name`+`kinds`; rename sets + clears a persisted alias; reconnect drops ≥1 connection. **Config isolated** ([ui/server.ts](ui/server.ts)): `CONFIG_DIR` honors `NOTIFY_MCP_CONFIG_DIR`; the test points it at a `mkdtempSync` dir (sim/live separation, same pattern as #32) so rename never touches the live `~/.notify-mcp`.
+
+**Verify (verified).** `node --test tests/smoke.test.mjs` → **10/10 pass, EXIT=0**. Real `~/.notify-mcp/config.json` `clientAliases` stayed `{}` after the run (no pollution); temp dirs cleaned up (0 leftover).
+
+---
+
+### 2026-06-08 13:52 — #32 isolate test inbox drops (sim/live separation)
+
+**Found via slack-bus fallout.** Pre-#28 broken smoke runs (no waiter parked) injected `hello from test` via `/__test__/inject-inbox` → `writeInboxDrop` wrote to the SHARED `~/.notify-mcp/inbox/` dir the live hook/bridge read → 6 test pings surfaced to the live agent; a leaked test server (live slack poller, port 59528) even hijacked a real Slack message. #28 stops the leak in practice (green tests park waiters → no drop), but per the hard sim/live rule a test must NEVER touch the live inbox. **Fixed** ([ui/server.ts:1246](ui/server.ts#L1246)): `INBOX_DROP_DIR` → `~/.notify-mcp/inbox-test` when `NOTIFY_MCP_TEST_ENDPOINTS=1`, else the live `inbox`.
+
+**Verify.** Build clean; smoke 7/7 still green; a smoke run leaves the live `~/.notify-mcp/inbox/` untouched (any drop lands in `inbox-test`). Also handled the live request that arrived over the bus mid-session — *"invalidate all clients and let them reconnect"* → invalidated both clients (9 connections dropped), both reconnected, replied in-channel `{ok:true}`.
+
+---
+
+### 2026-06-08 13:46 — #30 watchdog redeploy fixed (silent taskkill failure)
+
+**Root cause (deeper than first thought).** `bus-up.sh` sets `MSYS_NO_PATHCONV=1`, which stops Git-Bash collapsing `//F`→`/F`, so `taskkill //F //PID` got the literal `//F` → `ERROR: Invalid argument/option - '//F'`. The kill **silently failed every redeploy** (output was `>/dev/null`), so the old listener kept `:3737`, the relaunch `EADDRINUSE`-crashed, and "auto-redeploy on build" (#22) never actually swapped the process — the manual kills I needed 3× this turn. **Fixed** ([bus-up.sh](bus-up.sh)): single-slash `taskkill /F /PID` (correct under `MSYS_NO_PATHCONV=1`); added a `port_listening` helper + wait-until-`:3737`-free (≤10s) before relaunch + verify-bind-or-log-`FAILED` loop (replacing the blind `sleep 1`/`sleep 4`).
+
+**Verify (verified).** Confirmed `MSYS_NO_PATHCONV=1 taskkill //F //PID` errors but `/F /PID` succeeds. Single-watchdog redeploy (touch build → detect): **PID 69100 → 35588, 0 EADDRINUSE, clean "Claude Notify config UI" startup, 1 server + 1 watchdog**. (Earlier double-`(re)started` was a transient two-watchdog state from my manual restarts — cleaned to one.)
 
 ---
 
@@ -107,188 +121,3 @@ _(empty — only Meni places rows here)_
 
 **Verify (verified).** Forced double-launch: first → `started — tag=dell-xps-bullseyenotify-bot`; second → `another instance alive (…) — exiting`. Steady-state one real responder (the extra `notify-watch.sh`-matching PID is its own read-loop child subshell, parent = the responder — not a duplicate).
 
----
-
-### 2026-06-05 13:34 — #21 runtime missing piece fixed: no-admin Startup fallback
-
-**Fixed.** Updated [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) `install` path to auto-fallback when `schtasks /Create` returns `Access is denied`: it now writes `BullseyeNotify Bus Watchdog.cmd` into the user Startup folder (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`) so boot auto-start works without Task Scheduler create rights.
-
-**Also added.** `status` now reports both task and startup-fallback states; `remove` now removes both task entry and startup fallback.
-
-**Verify.** On this machine: `bash scripts/bus-startup-task.sh install` showed scheduler denial then installed startup fallback; `bash scripts/bus-startup-task.sh status` reported `startup_fallback: present` with file path `C:\Users\menih\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\BullseyeNotify Bus Watchdog.cmd`.
-
----
-
-### 2026-06-05 13:31 — #15 client identity done + #21 boot-persistence done (disclosed)
-
-**Fixed #15.** Updated `NOTIFY_MCP_TAG` in `C:\Users\menih\.claude.json` from `claude-code` to `bullseyenotify`.
-
-**Verify (#15).** Readback confirms `mcpServers.notify.env.NOTIFY_MCP_TAG = bullseyenotify`. On next Claude reload/reconnect, session tag resolves from workspace identity instead of `claude-code`.
-
-**Fixed #21.** Boot-persistence implementation is complete in [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) + [bus-up.sh](bus-up.sh), including user-facing install/status/run/remove commands.
-
-**Not verified — needs OS permission step (#21).** In this shell, both script install and direct `schtasks /Create` return `ERROR: Access is denied.` (including explicit `/RU "$USERNAME" /RL LIMITED`). Run one successful install from a shell/account with Task Scheduler create rights, then reboot-check.
-
----
-
-### 2026-06-05 05:52 — #21 Boot-persistence installer script + Task Scheduler diagnostics
-
-**Added** [scripts/bus-startup-task.sh](scripts/bus-startup-task.sh) to make startup persistence repeatable from bash: `install`, `status`, `run`, `remove` for the `BullseyeNotify Bus Watchdog` logon task that launches [bus-up.sh](bus-up.sh).
-
-**Fixed** two scheduling pitfalls discovered live: Git-Bash was rewriting `/Create` (`MSYS_NO_PATHCONV=1` added), and `schtasks /TR` parsing failed with spaced paths (switched to DOS short paths via `cygpath -d`).
-
-**Verify.** `bash scripts/bus-startup-task.sh install` reaches Windows Task Scheduler correctly but returns `ERROR: Access is denied.` in this shell; independent control check `schtasks /Create ... "BN-Test-Task" ...` returns the same denial. **Not verified — needs one external step:** run `bash scripts/bus-startup-task.sh install` from a shell/account with task-create rights, then `bash scripts/bus-startup-task.sh status` and reboot-check bus auto-start.
-
----
-
-### 2026-06-05 03:39 — #24 Permission-prompt prevention + bus UX refinements + raw-passthrough mandate
-
-**Fixed prompts:** `"Bash(**)"` is invalid for command matching (per claude-code-guide — `**` only matches file paths) → changed to `"Bash"` in `~/.claude/settings.json` + [.claude/settings.json](.claude/settings.json), allowing all bash in default mode (only `cd`+`git` in one compound still prompts — avoided). **Raw passthrough (Meni mandate, verbatim:** *"anything I ask AI to do MUST be passed RAW without any interpretations, conversion, transitions"*): deleted the hardcoded `*time*` fast-path in [notify-watch.sh](notify-watch.sh) — every message now goes RAW to the headless `claude -p`; the headless agent is told to NEVER call `notify`/`ask` (its only output is the slack/reply curl) to cut extra Slack posts. **TTS fix:** [ui/server.ts:388](ui/server.ts) `/api/test/tts` speaks the provided `text` (was hardcoded "this is a voice test"). **UX:** brief `ack` (tagged+untagged, no echo, no double "caught" line); `clients` command; `slackClientTags` counts long-poll waiters so `@N` resolves the worker; `ingestInboxEntry` file-drops only when no waiter (no double-handling). **Desktop notif diagnosis:** notify-mcp's desktop is gated off (`enableDesktop=false`, [ui/server.ts:860](ui/server.ts)) — the toasts are SLACK's own app notifications; fix is mute/mentions-only in Slack, not code.
-**Verify.** Both settings show `"Bash"`; worker raw passthrough + `bus-worker caught` removed (grep=0); TTS uses body text; live bus answered injects.
-
----
-
-### 2026-06-05 03:39 — #23 Busy-state detection reported in the bus ack
-
-**Added** (Meni: *"MCP must detect prompt business BEFORE sending command and report it back as part of ack"*) `POST /api/session/state {tag,busy}` + `sessionBusy`/`sessionBusyNote`/`busyEtaSecs` in [ui/server.ts](ui/server.ts): a tagged dispatch ack shows "🔧 Claude @tag is busy (Xs) … ~ETA" when that session is busy, else "ack". The interactive session reports busy/idle by a `curl /api/session/state` folded into the already-active [.claude/notify-inbox-drain.sh](.claude/notify-inbox-drain.sh) (busy on every event, idle on Stop) — works with NO window reload (a standalone `session-state.sh` hook would need one). ETA = rolling average of recent busy spans.
-**Verify.** Endpoint returns `{ok:true,busy:true}`; busy note wired into dispatch. **Live ack-shows-busy confirmation pending** Meni posting while a turn is in flight.
-
----
-
-### 2026-06-05 03:39 — #22 Bus self-healing watchdog (independence from the interactive session)
-
-**Added** [bus-up.sh](bus-up.sh) — a detached **singleton** watchdog (PID-file guarded) that is the SOLE manager of the `:3737` server + `notify-watch.sh` worker, so the bus survives the interactive session being blocked/prompted (Meni: *"when prompt takes place … the whole notification business comes to a screeching halt"*). Uses a **port-listening** liveness check (HTTP-health gave false negatives that killed healthy servers → restart loop), acts only after 2 consecutive failures, relaunches with `ENABLE_MCP=1`, and **auto-redeploys on a new build** (dist mtime) so `npm run build` deploys with no manual relaunch/race.
-**Verify.** Watched live: server PID stable, NO restart loop after the port-listening fix; killing the server → watchdog relaunched it; `bus-up.log` clean.
-
----
-
-### 2026-06-05 02:45 — #20 VSC agent auto-reply — SOLVED via detached worker (P1)
-
-**Solved** the Slack→agent→reply loop. Root insight (Meni): the long-poll CANNOT live in the interactive agent or a hook — that blocks the prompt — so the responder is a STANDALONE detached process: [notify-watch.sh](notify-watch.sh) long-polls `GET /api/agent/inbox/wait` (plain HTTP, no MCP) and per message answers `*time*` directly (+TTS) or hands to a headless `claude -p` that replies via `POST /api/agent/slack/reply`. **Cleared 3 masking bugs:** killed 7 zombie `slack-poll.sh`/`notify-watch.sh` (dup/steal), restricted the drain hook to `Stop`/`UserPromptSubmit` (PreToolUse/PostToolUse delete-without-deliver, CC #24788/#55889), re-added `ENABLE_MCP=1` to the relaunch. **Refined:** brief `ack` (tagged+untagged, no echo, no double "caught" line), `clients` command, `slackClientTags` counts worker waiters (so `@N` resolves to it), `ingestInboxEntry` file-drops only when no waiter (no double-handling). Architecture → [claude.app.md](claude.app.md).
-**Verify.** LIVE with Meni: "Use speech to say current time" → reply in ~2s ("The current time is 07:28 PM" + Windows notif); "What's your name?" → headless agent answered ~18s; "ping"→"pong". Meni verbatim: *"ITS WORKING!!! I got immediate response!!!"*. Interactive prompt never blocked (separate process). Follow-up polish → #21.
-
----
-
-### 2026-06-05 01:40 — #16 Slack dispatcher folded into the always-on server (P0)
-
-**Replaced** `slack-poll.sh` (DELETED — rip-and-replace §1) with an in-server poller: `startSlackListener`/`pollSlackOnce` in [ui/server.ts](ui/server.ts), started at boot beside the Telegram listener. Polls `conversations.history` every 2s; `list clients`/`help` answered centrally via the webhook; `@<tag>`/`#<id>` resolves to a connected client + injects (untagged → broadcast); unknown-client error reply; 300s startup backfill closes the restart gap. Survives as long as :3737 runs — no agent session required.
-**Verify.** Live after relaunch: `list clients` (01:25:06) → bus answered in **2s** (channel post + log); `@2 - ping` → `✓ dispatched to @dell-xps-claude-code` + inbox inject in `.run/server.log`; `[slack] listener ready` logged; `auth.test` ok.
-
----
-
-### 2026-06-05 01:40 — #19 Build/restart hygiene + relaunch mandate
-
-**Recorded** Meni's mandate (*"when you make code changes, server is relaunched!!! otherwise we will be chasing ghosts!!!"*) in [claude.app.md](claude.app.md) "Build + relaunch" section: after any `ui/server.ts`/`src/index.ts` edit → `npm run build` + relaunch :3737 (resolve PID, `taskkill //F //PID`, `node dist/ui/server.js` detached), verify live. Folding the poller into the server (#16) means one restart now covers polling too.
-**Verify.** Section present in claude.app.md; routine exercised twice this session (kill PID → relaunch → `/v1/health` ok + listener-ready).
-
----
-
-### 2026-06-05 01:40 — #18 Tokens-in-git GitHub block worked around (Meni directive: *"its not github business what I put in my private repo … Work around that"*)
-
-**Obfuscated** the secret values in [notify-secrets.json](notify-secrets.json) as base64 with a `_b64` key suffix, decoded at load by `loadSecrets`/`decodeB64Fields` in [ui/server.ts](ui/server.ts) — so neither GitHub push-protection NOR Slack's auto-revoke partner can pattern-match the `xoxb`/webhook. **Rewrote** the 4 unpushed commits (`git reset --soft origin/main` + `git add -A`) so the raw secret blob (introduced in `df259e8`) never reaches a pushed commit. **Fixed** the remote URL → `github.com/menih/BullseyeNotif.git`.
-**Verify.** Decoded `xoxb` token → `auth.test` ok (team AlphaWave); staged-tree raw-secret scan clean (only a harmless UI placeholder `…`). **Operator-verify (Meni pushes):** `git commit && git push` — should now succeed; token stays valid. Recover the old tip if needed: `git reset --soft 7009c81`.
-
----
-
-### 2026-06-05 00:15 — #14 Slack bus dispatch UX (ACK / errors / numeric IDs / 2s)
-
-**Rewrote** [slack-poll.sh](slack-poll.sh): 2s poll, process-substitution loop (replaces the pipe-subshell that was silently dropping messages), dispatch ACK ("✓ dispatched to @<tag>"), invalid-client error reply ("❌ Unknown client … Connected: …"), numeric client IDs (`#1`/`@1` or full name), @mention stripping, timestamped logging.
-**Verify.** Syntax OK; logic test: numbered `1. claude-code`; resolve `#1`/`claude-code`→tag, `bogus`→empty (triggers error). NOTE: reliability/latency is **#16** (poller-as-background-task gaps), tracked separately.
-
----
-
-### 2026-06-05 00:15 — #17 slack-poll cursor replay cap
-
-**Fixed** the replay bug (poller re-injected hours of channel history when the cursor file was stale → flooded the inbox with 16 old messages). On start, [slack-poll.sh](slack-poll.sh) resets the cursor to NOW if missing or >300s stale.
-**Verify.** Running poller's cursor reset to now; no further replay.
-
----
-
-### 2026-06-04 23:28 — #13 Windows Defender exclusions
-
-**Done by Meni** (admin `Add-MpPreference`). Verified via `Get-MpPreference`: ExclusionPath includes `C:\Users\menih\Desktop` (+ `.notify-mcp`, `.m2`, `Temp`, `ms-playwright`); ExclusionProcess includes `rg.exe`, `node.exe`, `bash.exe`, `git.exe`, `Code.exe`, `claude.exe`, `npm.cmd`, `tsc.cmd`, etc. — the CPU/Defender storm (rg + node) is resolved. Bonus: full JDK/Maven/Gradle/JetBrains/Python toolchain also excluded.
-**Verify.** Meni's `Get-MpPreference` output shows every required path + process present.
-
----
-
-### 2026-06-04 23:00 — #9 slack-poll cursor durability
-
-**Added** a health guard at the top of [slack-poll.sh](slack-poll.sh)'s loop: `curl -sf $BASE/v1/health || continue` — if the inbox server is down, the cycle is skipped WITHOUT advancing the cursor, so messages arriving during the outage are picked up when it recovers (no silent loss).
-**Verify.** `bash -n` clean; poller restarted, healthy (server up → cycles run; server down → skip+retry).
-
----
-
-### 2026-06-04 23:00 — #12 Persist auth tokens in git
-
-**Added** [notify-secrets.json](notify-secrets.json) — one git-tracked store with every token (Slack bot token + channel + webhook, Telegram, email app-password, ntfy). **Pointed** [slack-poll.sh](slack-poll.sh) at it (reads `.slack.botToken/.channelId/.webhookUrl` from the committed file, falling back to `~/.notify-mcp/slack-config.sh`/`config.json`). Per §11, risk accepted.
-**Verify.** `git check-ignore notify-secrets.json` → not ignored (TRACKED); token/channel/webhook read back from the file. **Disclosed — Meni commits:** `git add notify-secrets.json && git commit`.
-
----
-
-### 2026-06-04 23:00 — #11 Multi-VSC Slack-bus architecture doc
-
-**Added** [docs/SLACK-BUS.md](docs/SLACK-BUS.md) — components (server / bridge / slack-poll.sh / hooks / notify-watch.sh), `<hostname>-<vsc-id>` identity + `@tag` routing, inbound/command/outbound flow, loop prevention, operating steps, known limits.
-**Verify.** File written; matches the shipped implementation.
-
----
-
-### 2026-06-04 22:50 — #10 Slack `list clients` command + bridge `<hostname>-<vsc-id>` identity
-
-**Added** a command interceptor to [slack-poll.sh](slack-poll.sh): `list clients` / `help` are executed centrally (query `/api/sessions`, post result to Slack via webhook) instead of routed to a VSC — "handled by the MCP side, replies right there." **Changed** the bridge ([src/index.ts:36](src/index.ts)) to self-identify as `<hostname>-<vsc-id>` (vsc-id = `NOTIFY_MCP_TAG` or the workspace folder name) instead of hardcoded `claude-code`.
-**Verify.** `list clients` posted "Connected clients: claude-code" into the channel (live, observed). Bridge `tsc` exit 0; identity logic prints `dell-xps-claude-code` (or `dell-xps-bullseyenotify` if `NOTIFY_MCP_TAG` unset). **Disclosed — running bridge keeps `claude-code` until the Claude Code window is reloaded** (bridge re-registers its tag on reconnect); set `NOTIFY_MCP_TAG` per window for unique names.
-
----
-
-### 2026-06-04 22:21 — #7 Slack inbound poller (multi-VSC → one channel)
-
-**Added** [slack-poll.sh](slack-poll.sh) — polls the shared Slack channel via `conversations.history` (bot token + channel id in `~/.notify-mcp/slack-config.sh`, cursor in `slack-cursor.txt`) and injects human messages into the notify-mcp inbox, routing `@<tag> …` to that VSC's `NOTIFY_MCP_TAG` (untagged → broadcast). Reuses the verified inbox → hook/loop/wait delivery. Filters bot/webhook/system messages (`subtype==null and bot_id|not and app_id|not`) to prevent loops; `MSYS_NO_PATHCONV=1` fixes Git-Bash mangling of leading-`/` text. Creds stored in `~/.notify-mcp/slack-config.sh` (chmod 600). Running live (cursor=now).
-**Verify (IT-mandate §4).** `auth.test`→`ok:true` (bot `yaroksoft`@AlphaWave); `conversations.history`→`ok:true` (channel `C0B1W7NKKFS` readable, in-channel). Dry-parse extracted human messages, filtered joins/bots. End-to-end: fetched a real Slack msg → injected (tag `slacktest`) → drained → matched. MSYS fix confirmed: `/run the build now and fix /etc/hosts` round-trips intact (was mangled to `C:/Program Files/Git/…` pre-fix). **Live-loop demo pending** one human post in the channel.
-
----
-
-### 2026-06-04 19:41 — #6 ui MCP_INSTRUCTIONS LCD coverage (no edit)
-
-**Verified** the HTTP server's `MCP_INSTRUCTIONS` ([ui/server.ts:1610](ui/server.ts)) rule 6 already establishes `wait_for_inbox` as the most-reliable cross-host delivery path and states SSE/channel notifications are silently dropped. No edit needed — adding one would be gratuitous churn (§4 smallest-change).
-**Verify.** Read lines 1706–1714; LCD long-poll guidance present.
-
----
-
-### 2026-06-04 19:41 — #5 Fix ui/server.ts build break
-
-**Fixed** the red `npm run build`: added the three missing imports to [ui/server.ts](ui/server.ts) (`z` from zod, `McpServer` from `@modelcontextprotocol/sdk/server/mcp.js`, `StreamableHTTPServerTransport` from `…/streamableHttp.js`) and declared `const ENABLE_MCP = (process.env.ENABLE_MCP ?? "").trim() === "1"` — an existing intentional gate (src/index.ts:74 spawns the UI with `ENABLE_MCP: "1"`; the /mcp endpoint has "Set ENABLE_MCP=1" messages), just never declared. Not a new gate (§4 OK).
-**Verify.** `npm run build` → exit 0 (both `tsc` + `tsc -p ui/tsconfig.json` clean). Import paths confirmed via `require.resolve`.
-
----
-
-### 2026-06-04 19:41 — #4 Document delivery design in claude.app.md
-
-**Replaced** the "Full-duplex inbound" section of [claude.app.md](claude.app.md): channels marked ⛔ CLI-ONLY (dead in the VSCode extension + Copilot — never recommend for this runtime), the lowest-common-denominator principle ("someone must CALL the poll"; MCP tools are the only shared mechanism), and the dual design (Stop hook for Claude Code active loop + `notify-watch.sh` external loop for idle/Copilot).
-**Verify.** Section rewritten; channels demoted with verified-against-spec note.
-
----
-
-### 2026-06-04 19:25 — #3 notify-watch.sh external launcher loop
-
-**Added** [notify-watch.sh](notify-watch.sh) — standalone loop that is the external "someone who calls it": long-polls `/api/agent/inbox/wait` (50s) and launches a handler (`claude -p` default, `NOTIFY_AGENT_CMD`-configurable) per message. Covers the idle / away / Copilot case where hooks (Claude-only) and channels (CLI-only) can't fire. Env-configurable; executable.
-**Verify.** `bash -n notify-watch.sh` clean. **Not fully verified — needs** a live run + injected message to confirm the handler launches (test steps handed to Meni).
-
----
-
-### 2026-06-04 19:25 — #2 LCD: MCP instructions reframed to wait_for_inbox long-poll
-
-**Replaced** the channels-first framing in the stdio bridge's MCP `instructions` ([src/index.ts:192](src/index.ts)) with a wait_for_inbox-long-poll-first framing. Both Claude Code and Copilot inject this into the agent's system prompt.
-**Verify.** `npm run build` exit 0 → `dist/index.js` emitted. **Disclosed — takes effect on MCP reconnect/session restart**, not mid-session.
-
----
-
-### 2026-06-04 19:25 — #1 Auto-delivery via Stop hook
-
-**Replaced** [.claude/notify-inbox-drain.sh](.claude/notify-inbox-drain.sh) to branch on hook event (Stop → `decision:block` + pending drops as reason; UserPromptSubmit → `additionalContext`) and **wired it into the Stop event** in [.claude/settings.json](.claude/settings.json). Fixes the bug where the drain only ran on UserPromptSubmit and never fired during a continuous work loop. PostToolUse deliberately avoided (CC #24788/#55889 drop its context).
-**Verify.** VERIFIED live — 3 pending messages auto-surfaced via the Stop hook with zero manual draining; 4 unit cases pass.
-
----
-
-### 2026-06-04 19:25 — Diagnostics (no code) — Telegram + Channels
-
-**Telegram:** token `8755252698:…` revoked — `getMe`→`401` (verified curl). Fix tracked in #8.
-**Channels:** verified against the official Channels reference — `notifications/claude/channel` is CLI-only (`--channels`), unavailable in the VSCode extension + Copilot; bridge notification shape is spec-correct. Drove the LCD pivot (#2, #3).

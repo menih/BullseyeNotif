@@ -15,11 +15,16 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync } from "node:fs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const UI_SERVER = join(ROOT, "dist", "ui", "server.js");
 const STDIO_BRIDGE = join(ROOT, "dist", "index.js");
+// Isolated config dir so rename/config-writing tests never touch the real
+// ~/.notify-mcp (sim/live separation).
+const TEST_CONFIG_DIR = mkdtempSync(join(tmpdir(), "notify-mcp-test-"));
 
 // Allocate a random free port each run so tests can run in parallel with a
 // user's normal `:3737` server — and so two test runs don't collide.
@@ -59,6 +64,8 @@ function startServer(port) {
       NOTIFY_MCP_TEST_ENDPOINTS: "1",
       // The /mcp transport is gated behind ENABLE_MCP=1; the tests exercise it.
       ENABLE_MCP: "1",
+      // Isolated config dir — never read/write the real ~/.notify-mcp.
+      NOTIFY_MCP_CONFIG_DIR: TEST_CONFIG_DIR,
       // Suppress noise from the auto-open browser call in tests.
       BROWSER: "none",
     },
@@ -128,6 +135,49 @@ test.after(async () => {
     server.kill("SIGKILL");
     await once(server, "exit").catch(() => {});
   }
+  rmSync(TEST_CONFIG_DIR, { recursive: true, force: true });
+});
+
+// Open a tagged MCP session so the client shows up in /api/clients by that tag.
+async function initTaggedSession(tag) {
+  const r = await fetch(`http://localhost:${port}/mcp?tag=${encodeURIComponent(tag)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } }),
+  });
+  assert.equal(r.status, 200, `tagged initialize failed: ${r.status}`);
+}
+
+test("/api/clients lists a tagged session with name + kinds", async () => {
+  const tag = "clientlisttest";
+  await initTaggedSession(tag);
+  const { clients } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const c = clients.find(x => x.tag === tag);
+  assert.ok(c, `tagged client ${tag} not listed`);
+  assert.equal(c.name, tag, "name should default to the tag when no alias");
+  assert.ok(c.kinds.includes("mcp"), `expected mcp kind, got ${JSON.stringify(c.kinds)}`);
+});
+
+test("rename sets then clears a persisted client alias", async () => {
+  const tag = "renametest";
+  await initTaggedSession(tag);
+  const rename = (name) => fetch(`http://localhost:${port}/api/clients/${tag}/rename`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+  });
+  const nameOf = async () => (await (await fetch(`http://localhost:${port}/api/clients`)).json()).clients.find(x => x.tag === tag)?.name;
+
+  await rename("aliased-name");
+  assert.equal(await nameOf(), "aliased-name", "alias not applied");
+  await rename("");
+  assert.equal(await nameOf(), tag, "alias not cleared");
+});
+
+test("reconnect drops a client's live connections", async () => {
+  const tag = "reconntest";
+  await initTaggedSession(tag);
+  const res = await (await fetch(`http://localhost:${port}/api/clients/${tag}/reconnect`, { method: "POST" })).json();
+  assert.equal(res.ok, true);
+  assert.ok(res.closed >= 1, `expected >=1 connection closed, got ${res.closed}`);
 });
 
 test("initialize returns protocol + tool capabilities", async () => {

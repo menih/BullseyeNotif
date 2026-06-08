@@ -22,7 +22,7 @@ const REDIRECT_URI = `http://localhost:${PORT}/auth/google/callback`;
 
 const PUBLIC_DIR = join(fileURLToPath(new URL("../../ui/public", import.meta.url)));
 
-const CONFIG_DIR = join(homedir(), ".notify-mcp");
+const CONFIG_DIR = process.env.NOTIFY_MCP_CONFIG_DIR || join(homedir(), ".notify-mcp");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 const ADC_PATH = join(homedir(), ".config", "gcloud", "application_default_credentials.json");
 const AGENT_API_KEY = (process.env.NOTIFY_AGENT_KEY ?? "").trim();
@@ -1243,7 +1243,9 @@ function matchesSession(entry: InboxEntry, sessionTag: string | undefined): bool
 // ship a one-liner hook in the README that globs that directory. This is the
 // closest thing to a "/btw" we can get until the client exposes a real inject
 // endpoint.
-const INBOX_DROP_DIR = join(CONFIG_DIR, "inbox");
+// Test mode drops to an isolated dir so a smoke run never pollutes the live
+// inbox the hook/bridge read (sim/live separation).
+const INBOX_DROP_DIR = join(CONFIG_DIR, process.env.NOTIFY_MCP_TEST_ENDPOINTS === "1" ? "inbox-test" : "inbox");
 const INBOX_DROP_TTL_MS = 24 * 60 * 60 * 1000; // 24h — hook should have consumed within seconds
 
 function writeInboxDrop(entry: InboxEntry): void {
