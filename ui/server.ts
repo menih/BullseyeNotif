@@ -834,32 +834,75 @@ app.delete("/api/sessions/:clientId", (_req, res) => {
   res.status(410).json({ error: "session_disconnect_unsupported", message: "HTTP mode does not support remote disconnect." });
 });
 
-// Unified live-client view for the UI "Clients" tab — the same set the Slack
-// `list clients` command reports: tagged MCP sessions + live SSE subscribers +
-// parked long-poll waiters (e.g. the notify-watch responder), aggregated by tag.
+// Live-client view for the UI "Clients" tab. Each live MCP session is one
+// logical client = one VSC Claude extension panel (its own bridge process);
+// clientId already disambiguates same-tag panels (foo, foo-2, …), and panel/
+// panelCount expose that as ordinals. Tags present only as SSE streams or parked
+// long-poll waiters (e.g. the notify-watch `…-bot` responder) get one row each.
 app.get("/api/clients", (_req, res) => {
   pruneDeadSessions();
   const now = Date.now();
-  const byTag = new Map<string, { tag: string; kinds: Set<string>; lastSeen: number; host?: string; workspaceName?: string; clientName?: string }>();
-  const touch = (tag: string | undefined, kind: string, lastSeen: number, extra: { host?: string; workspaceName?: string; clientName?: string } = {}) => {
-    if (!tag) return;
-    const cur = byTag.get(tag) ?? { tag, kinds: new Set<string>(), lastSeen: 0 };
-    cur.kinds.add(kind);
-    if (lastSeen > cur.lastSeen) cur.lastSeen = lastSeen;
-    if (!cur.host && extra.host) cur.host = extra.host;
-    if (!cur.workspaceName && extra.workspaceName) cur.workspaceName = extra.workspaceName;
-    if (!cur.clientName && extra.clientName) cur.clientName = extra.clientName;
-    byTag.set(tag, cur);
+  const active = Object.entries(sessions)
+    .map(([sid, s]) => ({ sid, ...s }))
+    .sort((a, b) => a.connectedAt - b.connectedAt);
+  const panelTotals = new Map<string, number>();
+  for (const s of active) {
+    const key = s.tag ?? s.clientId;
+    panelTotals.set(key, (panelTotals.get(key) ?? 0) + 1);
+  }
+  const ordinals = new Map<string, number>();
+  const clients = active.map(s => {
+    const key = s.tag ?? s.clientId;
+    const panel = (ordinals.get(key) ?? 0) + 1;
+    ordinals.set(key, panel);
+    const kinds = ["mcp"];
+    if (s.tag && sseSubscribersForTag(s.tag) > 0) kinds.push("sse");
+    return {
+      id: s.clientId,
+      sessionId: s.sid.slice(0, 8),
+      tag: s.tag,
+      name: displayTag(s.tag ?? s.clientId),
+      panel,
+      panelCount: panelTotals.get(key) ?? 1,
+      kinds,
+      lastSeen: s.lastSeen,
+      connectedAt: s.connectedAt,
+      host: s.host,
+      workspaceName: s.workspaceName,
+      clientName: s.clientName,
+    };
+  });
+  const tagsWithSession = new Set(active.map(s => s.tag).filter(Boolean) as string[]);
+  const extra = new Map<string, Set<string>>();
+  const addExtra = (tag: string, kind: string) => {
+    const set = extra.get(tag) ?? new Set<string>();
+    set.add(kind);
+    extra.set(tag, set);
   };
-  for (const s of listActiveSessions()) touch(s.tag, "mcp", s.lastSeen, { host: s.host, workspaceName: s.workspaceName, clientName: s.clientName });
   for (const c of inboxStreamClients) {
     if (c.res.destroyed || c.res.writableEnded || !c.res.writable) continue;
-    touch(c.tag, "sse", now);
+    if (c.tag && !tagsWithSession.has(c.tag)) addExtra(c.tag, "sse");
   }
-  for (const [, w] of inboxWaiters) touch(w.tag, "waiter", now);
-  const clients = [...byTag.values()]
-    .map(c => ({ tag: c.tag, name: displayTag(c.tag), kinds: [...c.kinds], lastSeen: c.lastSeen, host: c.host, workspaceName: c.workspaceName, clientName: c.clientName }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  for (const [, w] of inboxWaiters) {
+    if (w.tag && !tagsWithSession.has(w.tag)) addExtra(w.tag, "waiter");
+  }
+  for (const [tag, kinds] of extra) {
+    clients.push({
+      id: tag,
+      sessionId: "",
+      tag,
+      name: displayTag(tag),
+      panel: 1,
+      panelCount: 1,
+      kinds: [...kinds],
+      lastSeen: now,
+      connectedAt: now,
+      host: undefined,
+      workspaceName: undefined,
+      clientName: undefined,
+    });
+  }
+  clients.sort((a, b) => a.name.localeCompare(b.name) || a.panel - b.panel);
   res.json({ clients });
 });
 
@@ -1342,7 +1385,10 @@ if (process.env.NOTIFY_MCP_TEST_ENDPOINTS === "1") {
     const out = ingestInboxEntry(entry, "test-inject");
     res.json({ injected: true, waiters: out.waiters, sse: out.sse });
   });
-  log("·", "test", "NOTIFY_MCP_TEST_ENDPOINTS=1 — /__test__/inject-inbox enabled");
+  app.get("/__test__/slack-clients", (_req, res) => {
+    res.json({ tags: slackClientTags(), numbered: slackClientsNumbered() });
+  });
+  log("·", "test", "NOTIFY_MCP_TEST_ENDPOINTS=1 — /__test__/inject-inbox + /__test__/slack-clients enabled");
 }
 
 app.get("/api/inbox/stream", (req, res) => {
@@ -1735,6 +1781,10 @@ async function slackPost(text: string): Promise<void> {
   } catch { /* webhook post is best-effort */ }
 }
 
+// Tags a user can @-address from Slack: only real interactive panels — tags
+// backed by a live MCP session or SSE stream. Waiter-only tags (the notify-watch
+// `…-bot` auto-responder long-polling /api/agent/inbox/wait) are intentionally
+// excluded: they receive broadcasts but are not something a human addresses.
 function slackClientTags(): string[] {
   pruneDeadSessions();
   const tags = new Set<string>();
@@ -1743,7 +1793,6 @@ function slackClientTags(): string[] {
     if (c.res.destroyed || c.res.writableEnded || !c.res.writable) continue;
     if (c.tag) tags.add(c.tag);
   }
-  for (const [, w] of inboxWaiters) if (w.tag) tags.add(w.tag);
   return [...tags].sort();
 }
 
@@ -1760,7 +1809,12 @@ function liveListenerCount(tag: string | undefined): number {
 
 function slackClientsNumbered(): string {
   const tags = slackClientTags();
-  return tags.length ? tags.map((t, i) => `${i + 1}. ${displayTag(t)}`).join("\n") : "(none connected)";
+  if (!tags.length) return "(none connected)";
+  return tags.map((t, i) => {
+    const panels = sessionsMatchingTag(t).length;
+    const suffix = panels > 1 ? ` (${panels} panels)` : "";
+    return `${i + 1}. ${displayTag(t)}${suffix}`;
+  }).join("\n");
 }
 
 function resolveSlackClient(handle: string): string | undefined {

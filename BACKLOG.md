@@ -10,7 +10,12 @@
 
 ### 🎯 OUTSTANDING
 
-_(empty)_
+| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
+|---|---|---|---|---|---|
+| 🖥️ Clients | 🟠 P1 | [#36](#36-vsc-level-client--per-panel-reply-id--s--p1) (S) | 0% | — | Client = VSC (broadcast to all panels); each panel tags its replies with a Panel ID. Fix located: [ui/server.ts:2106](ui/server.ts#L2106). |
+| 🔔 Notify | 🟡 P2 | [#40](#40-normal-priority-notifs-must-still-reach-vsc_notif--s--p2) (S) | 0% | — | Normal-priority notifs idle-gated when active — ensure they still reach vsc_notif. |
+| 🔔 Notify | 🟡 P2 | [#38](#38-bridge-misreports-delivered-as-n-chunks--s--p2) (S) | 0% | — | Bridge says "Delivered as N chunks" even when server delivered nothing. |
+| 🖥️ Clients | 🟡 P2 | [#39](#39-investigate-duplicate--orphan-sessions-per-window--s--p2) (S) | 0% | — | 3 live bridges for 2 windows — investigate orphan/duplicate sessions. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -27,6 +32,40 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### #36 VSC-level client + per-panel reply id · S · P1 · OPEN
+
+**Decision (Meni, revised).** Per-panel *addressing* is NOT required. Client = VSC/workspace (tag) is fine — preferred, even. Requirements: (a) addressing a client broadcasts to **all** its panels (already true — tag SSE fan-out); (b) each panel identifies itself with a **Panel ID** when it notifies/replies, so the user knows which panel answered. Not a routing change — an identity-on-reply change.
+
+**Root cause (located, verified).** The reply/notify prefix is the per-session IDENTITY built in `createMcpServer` at [ui/server.ts:2106](ui/server.ts#L2106): `const identity = sessionTag ? ` + "`@${sessionTag}`" + ` : clientId;` → `identityLine` ([ui/server.ts:2107](ui/server.ts#L2107)) tells the agent to prefix replies with `[${identity}]`. Because every panel of a VSC sends the same `sessionTag`, `identity` is identical (`@dell-xps-bullseyenotify`) for all panels — the per-panel-suffixed `clientId` (`foo`, `foo-2`, `foo-3`) is computed at [ui/server.ts:2523](ui/server.ts#L2523) but discarded here.
+
+**Plan (server-only, no bridge change).** Change [ui/server.ts:2106](ui/server.ts#L2106) to use the already-disambiguated `clientId` as the identity (e.g. `const identity = ` + "`@${clientId}`" + `;`). Panel 2's reply prefix then becomes `[@dell-xps-bullseyenotify-2]` — distinct per panel AND it exactly matches the `id` field `/api/clients` already returns (#35), so a reply maps to the Clients tab with zero extra plumbing. Add a test: two same-tag sessions yield distinct identity lines. Durable human names still via `NOTIFY_MCP_TAG` (#35/B). NOTE: identity activates per new MCP session, so restart/reconnect the bridge to pick it up.
+
+---
+
+### #40 Normal-priority notifs must still reach vsc_notif · S · P2 · OPEN
+
+**Confirmed working at high priority (Meni 2026-06-08 19:36).** A `priority:high` notif landed in vsc_notif — webhook→channel wiring is correct. Gap: `normal`-priority notifs are idle-gated to desktop-only while the user is active ([notificationEngine.ts:44](ui/messaging/notificationEngine.ts#L44)) + desktop is disabled → they silently vanish. Requirement: notifs must reliably land in vsc_notif.
+
+**Plan (decide policy).** Options: (a) treat Slack/vsc_notif as exempt from idle gating (always deliver to the channel, gate only phone/SMS/desktop); (b) lower/clear `idle.thresholdSeconds`; (c) agent sends important notifs as `priority:high`. Recommend (a) — the channel is a passive log, not an interrupt, so gating it adds no value. Implement as a per-channel "ignoreIdle" flag in routing.
+
+---
+
+### #38 Bridge misreports "Delivered as N chunks" · S · P2 · OPEN
+
+**Problem (verified).** `sendNotifyChunked` ([src/index.ts:278](src/index.ts#L278)) returns `Delivered as N chunks` regardless of the server's real result. When a notif is idle-gated to desktop-only and desktop is disabled, the HTTP server returns `No channels delivered` per chunk, but the bridge still claims delivery — which misled both Meni and the agent during the vsc_notif debug.
+
+**Plan.** Capture each chunk's server result string; if every chunk was suppressed / zero channels delivered, surface that verbatim (e.g. `Suppressed (idle-gated) — 0 channels`); only report "delivered" when ≥1 channel actually sent.
+
+---
+
+### #39 Investigate duplicate / orphan sessions per window · S · P2 · OPEN
+
+**Observation (Meni: 2 windows × 1 panel; server shows 3).** Verified via process tree: 3 live `claude.exe` bridges, but TWO share one VSC extension host (parent **61808** → claude 64204 + 33784 → bridges 52276 + 30956); the third is a separate window (parent 66216 → bridge 45032). All 3 heartbeat live → NOT stale ghosts; there genuinely are 3 bridges, so one window holds 2 Claude sessions (a lingering/orphaned conversation or hidden second panel). Server count is correct; the surprise is editor-side.
+
+**Plan.** Determine whether the extension leaves an orphaned `claude.exe` session on panel close/reopen (resume); document how to clear it. Optionally add a server-side dedup hint (same tag+host, overlapping `connectedAt`) to flag likely-duplicate panels in the UI. Investigation first — no fix until cause confirmed.
+
+---
+
 ### #8 Telegram token replacement · XS · P3 · 🚧 SHELVED (Meni 2026-06-04)
 
 **Shelved** per Meni — not active. Live token `8755252698:…` is revoked (`getMe`→`401`, verified). When resumed: replace `telegram.token` in `~/.notify-mcp/config.json` + `notify-secrets.json` with a fresh BotFather token; `chatId 8596060260` stays.
@@ -34,6 +73,36 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-08 19:55 — #37 hide `-bot` waiter from addressable list
+
+**Problem (Meni).** Slack `list clients` listed `dell-xps-bullseyenotify-bot` (the notify-watch auto-responder — waiter-only, tag hardcoded `…-bot` at [notify-watch.sh:8](notify-watch.sh#L8)) as addressable client **#2**. Meaningless to `@`-address.
+
+**Fixed** ([ui/server.ts](ui/server.ts) `slackClientTags()`). Dropped the `inboxWaiters` loop so the addressable set = tags backed by a live MCP session or live SSE stream. Waiter-only tags (the `…-bot` long-poller on `/api/agent/inbox/wait`) are excluded from `list clients` + `resolveSlackClient`, but still **receive broadcasts** (delivery is unchanged — `liveListenerCount`/fan-out still count waiters). Added a gated `/__test__/slack-clients` endpoint exposing `slackClientTags()`/`slackClientsNumbered()`.
+
+**Verify (verified).** `npm test` (= `npm run build` then `node --test`) → **build EXIT 0, 12/12 pass, 0 fail**. New test `list clients excludes a -bot waiter, keeps real panels` (**ok 3**) parks a `botfiltertest-bot` waiter alongside a real tagged session and asserts only the real tag is addressable. **Activation:** the notify UI server must be restarted to take effect (the running PID still serves the old `list clients`).
+
+---
+
+### 2026-06-08 19:28 — #35 per-panel client identity
+
+**Problem (verified, not guessed).** N Claude extension panels in one VSC window each spawn their own `claude.exe` → own bridge (`dist/index.js`) → own `/mcp` session (confirmed live: 3 bridge PIDs under 3 `anthropic.claude-code` parents). But every bridge derives the same tag `<host>-<workspace>` ([src/index.ts:64](src/index.ts#L64)), and both `/api/clients` and `list clients` aggregated by `tag`, collapsing N panels into 1 logical client. Claude Code passes NO per-session id to MCP subprocesses (only `CLAUDECODE=1`, `CLAUDE_PROJECT_DIR` — verified via claude-code-guide), but the server already mints a per-session `clientId` auto-suffixed `foo`/`foo-2`/… ([ui/server.ts:2523](ui/server.ts#L2523)) — the latent per-panel id was just never surfaced.
+
+**Fixed (A+B).** **A** — [ui/server.ts](ui/server.ts) `/api/clients` now enumerates one logical client per live MCP session (panel), keyed off `clientId`, adding `id`, `sessionId` (8-char), `panel`, `panelCount`; same-tag panels get ordinals `1..n`. SSE/long-poll-only tags with no MCP session (e.g. the notify-watch `…-bot` responder) still collapse to one row. `slackClientsNumbered()` annotates `(N panels)` while @N routing stays tag-scoped (delivery is per-tag SSE — per-panel addressing is a separate, larger change). UI Clients tab ([ui/public/app.js](ui/public/app.js)) shows a `panel n/total · <sessionId>` badge when >1. `tag`/`name`/`kinds` preserved for back-compat. **B** — [README.md](README.md): documented `NOTIFY_MCP_TAG` as the only durable per-bridge name + the multi-panel behavior.
+
+**Verify (verified).** `npm test` (= `npm run build` [tsc + ui tsconfig] then `node --test`) → **build EXIT 0, 11/11 pass, 0 fail**. New test `/api/clients lists one entry per panel for same-tag sessions` (two same-tag initialize calls → 2 entries, distinct `id`, panels `[1,2]`, `panelCount===2`) → `ok 2`; back-compat test `…tagged session with name + kinds` → `ok 1`. Tests run against compiled `dist/` on a random port with isolated `NOTIFY_MCP_CONFIG_DIR` — live `:3737` server + connected panels untouched. **Activation:** server-side logic (`/api/clients`, `list clients`) needs the UI server restarted to take effect; the static UI `app.js` updates on browser refresh.
+
+---
+
+### 2026-06-08 08:24 — #34 auto-chunk notify bodies over 500 chars
+
+**Root cause (verified, not guessed).** The 500-char rejection lived ONLY in the stdio bridge: `notify`/`reply` declared `message: z.string().max(500)` ([src/index.ts:275](src/index.ts#L275)), so the MCP SDK rejected any >500-char body with `MCP error -32602: too_big` BEFORE the handler ran — the agent was forced to hand-split every long update. The HTTP server has NO length cap (grep `max(500` over `ui/server.ts` → 0 hits; only delivery gate is [ui/server.ts:1099](ui/server.ts#L1099), no length check), so ≤500 chunks pass through cleanly. (The separate `No channels delivered` string is that same line's no-success fallback — `result.delivered` empty, no error, not suppressed — NOT a validation failure; out of scope here.)
+
+**Fixed.** New pure splitter module [src/chunk.ts](src/chunk.ts) (`splitForNotify`) — side-effect-free so it is verifiable without spawning the bridge or sending live Slack. Iteratively sizes N so each `(k/N) `-prefixed chunk is ≤500 chars incl. prefix, packs on word/newline boundaries with a hard-split fallback that guarantees the bound. [src/index.ts](src/index.ts): raised `notify` cap `500 → 5000`; both `notify` and `reply` now route through `sendNotifyChunked`, which forwards each chunk to the HTTP notify in order and reports `Delivered as N chunks`. Tool description + server `instructions` block updated — agent sends the full body in one call, server splits.
+
+**Verify (verified).** `npm run build:mcp` → EXIT=0, `dist/chunk.js`+`dist/index.js` emitted. Throwaway invariant check against compiled `dist/chunk.js` (8 cases: empty, short, exactly-500, 501, 1120, 2300 no-spaces, 826 realistic, 5000 cap): **ALL PASS** — every chunk ≤500, zero characters lost (whitespace-insensitive reassembly), sequential `(k/N)` prefixes, exactly-500 stays 1 chunk, 5000→11 chunks; script deleted after. `node --test tests/smoke.test.mjs` → **10/10 pass, EXIT=0** (incl. test 10 initializing the edited bridge). **Activation:** bridge `dist/index.js` is re-spawned per MCP client connection, so the change takes effect after the VSCode notify MCP server is reloaded/restarted (the HTTP watchdog does NOT redeploy the bridge).
 
 ---
 

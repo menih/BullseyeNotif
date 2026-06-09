@@ -833,19 +833,24 @@ async function refreshClients() {
     panel.innerHTML = clients.map(c => {
       const status = sessionStatus(c.lastSeen);
       const ago = Math.round((Date.now() - c.lastSeen) / 1000);
-      const label = c.name || c.tag;
+      const ref = c.tag || c.id;
+      const label = c.name || ref;
       const aliased = c.name && c.name !== c.tag;
       const kinds = c.kinds.map(k => `<span class="client-kind">${escHtml(k)}</span>`).join("");
+      const panelBadge = c.panelCount > 1
+        ? `<span class="client-panel" style="opacity:.6;font-size:.85em">panel ${c.panel}/${c.panelCount}${c.sessionId ? " · " + escHtml(c.sessionId) : ""}</span>`
+        : "";
       const where = [aliased ? c.tag : null, c.workspaceName || c.clientName, c.host].filter(Boolean).join(" · ");
-      const tagArg = c.tag.replace(/'/g, "\\'");
+      const refArg = ref.replace(/'/g, "\\'");
       const labelArg = label.replace(/'/g, "\\'");
       return `<div class="client-row">
         <span class="pill-dot pill-dot-${status}"></span>
-        <span class="client-tag" style="color:${clientColor(c.tag)}" title="${escHtml(c.tag)}">${escHtml(label)}</span>
+        <span class="client-tag" style="color:${clientColor(ref)}" title="${escHtml(ref)}">${escHtml(label)}</span>
+        ${panelBadge}
         <span class="client-kinds">${kinds}</span>
         <span class="client-actions">
-          <button class="btn btn-sm btn-ghost" onclick="renameClient('${tagArg}','${labelArg}')">Rename</button>
-          <button class="btn btn-sm btn-ghost" onclick="reconnectClient('${tagArg}')">Invalidate</button>
+          <button class="btn btn-sm btn-ghost" onclick="renameClient('${refArg}','${labelArg}')">Rename</button>
+          <button class="btn btn-sm btn-ghost" onclick="reconnectClient('${refArg}')">Invalidate</button>
         </span>
         <span class="client-meta">${where ? escHtml(where) + " · " : ""}seen ${ago}s ago</span>
       </div>`;

@@ -158,6 +158,30 @@ test("/api/clients lists a tagged session with name + kinds", async () => {
   assert.ok(c.kinds.includes("mcp"), `expected mcp kind, got ${JSON.stringify(c.kinds)}`);
 });
 
+test("/api/clients lists one entry per panel for same-tag sessions", async () => {
+  const tag = "multipaneltest";
+  await initTaggedSession(tag);
+  await initTaggedSession(tag);
+  const { clients } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const panels = clients.filter(x => x.tag === tag);
+  assert.equal(panels.length, 2, `expected 2 panels, got ${panels.length}`);
+  assert.notEqual(panels[0].id, panels[1].id, "panel ids should differ");
+  assert.deepEqual(panels.map(p => p.panel).sort(), [1, 2], "panels should be numbered 1 and 2");
+  assert.ok(panels.every(p => p.panelCount === 2), `panelCount should be 2, got ${JSON.stringify(panels.map(p => p.panelCount))}`);
+});
+
+test("list clients excludes a -bot waiter, keeps real panels", async () => {
+  const tag = "botfiltertest";
+  await initTaggedSession(tag);
+  const botTag = "botfiltertest-bot";
+  const waiterP = fetch(`http://localhost:${port}/api/agent/inbox/wait?timeout_seconds=5&tag=${botTag}`).catch(() => {});
+  await new Promise(r => setTimeout(r, 300));
+  const { tags } = await (await fetch(`http://localhost:${port}/__test__/slack-clients`)).json();
+  assert.ok(tags.includes(tag), `real panel ${tag} should be addressable, got ${JSON.stringify(tags)}`);
+  assert.ok(!tags.includes(botTag), `-bot waiter should NOT be addressable, got ${JSON.stringify(tags)}`);
+  await waiterP;
+});
+
 test("rename sets then clears a persisted client alias", async () => {
   const tag = "renametest";
   await initTaggedSession(tag);

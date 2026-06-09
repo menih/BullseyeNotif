@@ -110,6 +110,11 @@ Subscribe to `GET /api/inbox/stream` (text/event-stream) to receive unsolicited 
 ### Multi-session tagging
 Run multiple agents against the same notify server (e.g. one Claude session in `repo-a`, another in `repo-b`). Each connects with `?tag=<name>` and the user can route a Telegram message to a specific agent by prefixing `@<name>`. Untagged messages broadcast to every session.
 
+The stdio bridge derives its tag as `<hostname>-<workspace-folder>` unless you override it with the **`NOTIFY_MCP_TAG`** env var — set it to give a bridge a durable, human-meaningful name (e.g. `NOTIFY_MCP_TAG=frontend`). This is the only stable per-bridge name: Claude Code exposes no per-session id to MCP subprocesses, so two extension panels on the *same* workspace share a tag by default.
+
+### Multiple panels in one window
+Open N Claude extension panels in one VS Code window and each spawns its own bridge → its own MCP session. They share a tag (same host + workspace), but `/api/clients` lists each as a separate logical client (one per panel), disambiguated by an auto-suffixed id (`foo`, `foo-2`, …) plus `panel <n>/<total>` and a short session id. `list clients` annotates the panel count. To give a panel its own durable identity instead of an ordinal, launch it with a distinct `NOTIFY_MCP_TAG`.
+
 ### Do Not Disturb
 - **Manual toggle** — flip it on, all `priority < high` notifs drop on the floor.
 - **Scheduled quiet hours** — e.g. 22:00 → 08:00, configurable per-day.

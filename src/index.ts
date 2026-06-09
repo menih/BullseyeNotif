@@ -31,6 +31,7 @@ import { join, dirname, basename } from "path";
 import { hostname } from "os";
 import { fileURLToPath } from "url";
 import { z } from "zod";
+import { splitForNotify } from "./chunk.js";
 
 const PORT = process.env.NOTIFY_MCP_PORT ? parseInt(process.env.NOTIFY_MCP_PORT) : 3737;
 const BASE = `http://localhost:${PORT}`;
@@ -235,15 +236,14 @@ const server = new McpServer(
       "shorten it with '…' or a summary. NEVER mention delivery channels (Telegram, " +
       "SMS, desktop, etc.) or echo 'Sent via: …' — those are server internals. " +
       "Say 'notif' or 'notification' if you need to refer to the act of notifying.\n\n" +
-      "🚨 500-CHAR LIMIT — CHUNK, NEVER TRUNCATE 🚨\n" +
-      "The `notify` tool rejects bodies > 500 chars with `MCP error -32602: too_big`. " +
-      "When you have more to say than fits in 500 chars, you MUST split into MULTIPLE " +
-      "notify calls — do NOT silently shorten the body. Procedure: (1) decide what " +
-      "the user MUST see (every fact, file path, line number, recommendation); (2) if " +
-      "the body exceeds 500 chars, split into N chunks numbered '(1/N) ...', '(2/N) ...', " +
-      "each ≤ 500 chars including the prefix; (3) send all N chunks in order via separate " +
-      "notify calls and echo all N IN FULL in chat. NEVER respond to a `too_big` error by " +
-      "shortening to a single chunk — that loses information the user explicitly needs.\n\n" +
+      "🚨 NEVER TRUNCATE — THE SERVER CHUNKS FOR YOU 🚨\n" +
+      "Send the COMPLETE message (up to 5000 chars) in a single `notify` call. Bodies over " +
+      "500 chars are automatically split server-side into numbered '(1/N) ...', '(2/N) ...' " +
+      "chunks (each ≤500 chars) and delivered in order — you no longer hand-split, and a " +
+      "`too_big` error only fires past the 5000-char cap. Decide what the user MUST see " +
+      "(every fact, file path, line number, recommendation), send it all in one call, and " +
+      "echo it IN FULL in chat. NEVER shorten or summarize to fit — that loses information " +
+      "the user explicitly needs.\n\n" +
       "When the user asks you to remember a behavioral rule or change how you should act, " +
       "call `update_instructions` with the full updated rules block. This writes to CLAUDE.md " +
       "so the instructions persist across sessions and context compaction.",
@@ -265,17 +265,30 @@ async function proxyToolCall(name: string, args: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify(result ?? {}) }] };
 }
 
+async function sendNotifyChunked(message: string, priority: string) {
+  const chunks = splitForNotify(message);
+  if (chunks.length === 1) return proxyToolCall("notify", { message, priority });
+
+  const results = [];
+  for (const chunk of chunks) {
+    results.push(await proxyToolCall("notify", { message: chunk, priority }));
+  }
+  const failed = results.find(r => r.isError);
+  if (failed) return failed;
+  return { content: [{ type: "text" as const, text: `Delivered as ${chunks.length} chunks (${message.length} chars).` }] };
+}
+
 server.tool(
   "notify",
   "Send a notification to the user. Delivery channels and DND are server-configured. " +
-  "MAX 500 CHARS PER MESSAGE. If you have more to say, split into multiple notify " +
-  "calls with '(1/N) ...', '(2/N) ...' prefixes — never silently shorten on " +
-  "`too_big` error; that loses information the user needs.",
+  "Messages over 500 chars are automatically split into numbered '(1/N) ...' chunks " +
+  "(each ≤500 chars) and delivered in order — send the full message in one call, never " +
+  "truncate. Hard cap 5000 chars.",
   {
-    message: z.string().max(500),
+    message: z.string().max(5000),
     priority: z.enum(["low", "normal", "high"]).default("normal"),
   },
-  async (args) => proxyToolCall("notify", args)
+  async ({ message, priority }) => sendNotifyChunked(message, priority)
 );
 
 server.tool(
@@ -353,7 +366,7 @@ server.tool(
   },
   async ({ message, priority }) => {
     const tagPrefix = SESSION_TAG ? `[@${SESSION_TAG}] ` : "";
-    return proxyToolCall("notify", { message: `${tagPrefix}${message}`, priority });
+    return sendNotifyChunked(`${tagPrefix}${message}`, priority);
   }
 );
 
