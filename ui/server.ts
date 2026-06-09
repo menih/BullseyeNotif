@@ -842,8 +842,10 @@ app.delete("/api/sessions/:clientId", (_req, res) => {
 app.get("/api/clients", (_req, res) => {
   pruneDeadSessions();
   const now = Date.now();
+  const isBot = (t?: string) => !!t && t.endsWith("-bot");
   const active = Object.entries(sessions)
     .map(([sid, s]) => ({ sid, ...s }))
+    .filter(s => !isBot(s.tag))
     .sort((a, b) => a.connectedAt - b.connectedAt);
   const panelTotals = new Map<string, number>();
   for (const s of active) {
@@ -881,10 +883,10 @@ app.get("/api/clients", (_req, res) => {
   };
   for (const c of inboxStreamClients) {
     if (c.res.destroyed || c.res.writableEnded || !c.res.writable) continue;
-    if (c.tag && !tagsWithSession.has(c.tag)) addExtra(c.tag, "sse");
+    if (c.tag && !isBot(c.tag) && !tagsWithSession.has(c.tag)) addExtra(c.tag, "sse");
   }
   for (const [, w] of inboxWaiters) {
-    if (w.tag && !tagsWithSession.has(w.tag)) addExtra(w.tag, "waiter");
+    if (w.tag && !isBot(w.tag) && !tagsWithSession.has(w.tag)) addExtra(w.tag, "waiter");
   }
   for (const [tag, kinds] of extra) {
     clients.push({

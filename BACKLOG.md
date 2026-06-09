@@ -12,7 +12,8 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 🖥️ Clients | 🟡 P2 | [#42](#42-per-panel-invalidate-endpoint--button--s--p2) (S) | — | — | Proposed (from #39): per-session "Invalidate this panel" endpoint + UI button to clear an orphan panel. |
+| 🖥️ Clients | 🔴 P0 | [#43](#43-alphawave-vsc-panel-not-registering-with-mcp-server--s--p0) (S) | 0% | — | Global hardcoded NOTIFY_MCP_TAG=bullseyenotify mislabels every workspace incl AlphaWave — fix. |
+| 🖥️ Clients | 🟠 P1 | [#44](#44-hide--bot-waiter-from-the-clients-ui--xs--p1) (XS) | 0% | — | -bot auto-responder is meaningless to Meni — hide it from the Clients tab. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -29,11 +30,21 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #42 Per-panel "Invalidate this panel" endpoint + button · S · P2 · OPEN (proposed)
+### #43 AlphaWave VSC panel not registering with MCP server · S · P0 · OPEN
 
-**Proposed (from #39 investigation).** #39 confirmed the extra "client" is a real, still-alive resumed Claude panel (`claude.exe --resume …`), not a server bookkeeping ghost — so the server cannot distinguish a legit 2nd window from an orphan panel by tag+host (both are `dell-xps-bullseyenotify` / `127.0.0.1`). The naive "same tag+host + overlapping connectedAt → duplicate" dedup hint is therefore REJECTED — it would false-flag every genuine multi-panel/multi-window user.
+**Reported (Meni 2026-06-08).** *"why is AlphaWave workspace VSC, which is running right now, does not register with MCP server?!?"* + *"I dont have 3 panels open for claude in VSC but you are detecting 3!"*
 
-**Plan (the worthwhile piece).** Today the only ways to clear an orphan are editor-close or PID-kill; the Clients-tab "Invalidate" (`POST /api/clients/:tag/reconnect`, [ui/server.ts](ui/server.ts)) is tag-scoped — it drops ALL panels and the live one reconnects. Add a per-session disconnect: `POST /api/clients/:tag/panel/:sessionId/reconnect` that closes only `httpTransports[<full id matching the 8-char prefix>]` + its SSE stream; surface a per-panel "Invalidate this panel" button in `refreshClients()` ([ui/public/app.js](ui/public/app.js)) when `panelCount > 1`, showing each panel's `connectedAt` age. Lets Meni kill exactly the orphan from the UI without dropping live panels. Optional advisory-only hint: flag a panel whose `connectedAt` diverges from its siblings beyond `RECONNECT_WINDOW_MS` AND the server has been up longer than that window (never auto-disconnect).
+**Root cause (verified, not guessed).** The notify MCP is wired GLOBALLY (top-level `mcpServers` in [~/.claude.json:930](file:///c:/Users/menih/.claude.json)) with a HARDCODED `env.NOTIFY_MCP_TAG: "bullseyenotify"`. `deriveVscId()` ([src/index.ts:45](src/index.ts#L45)) returns the explicit `NOTIFY_MCP_TAG` first, so EVERY workspace's bridge — AlphaWave included — tags itself `bullseyenotify` and collapses into the one `dell-xps-bullseyenotify` client. AlphaWave IS connected; it's just mislabeled. The "3 panels I don't have" = panels from different windows (BullseyeNotify + AlphaWave + a lingering `--resume` panel, see #39) all forced under the same tag. Confirmed: all 3 live bridges run `BullseyeNotify/dist/index.js`, `/api/clients` shows only `dell-xps-bullseyenotify`.
+
+**Fix (two parts).** (a) **Code** — `deriveVscId()` should derive from `CLAUDE_PROJECT_DIR` (the per-workspace dir Claude Code sets) before `process.cwd()`, so each window self-tags by its real project. (b) **Config** — remove the hardcoded `env.NOTIFY_MCP_TAG` from the global notify block in `~/.claude.json` so the per-workspace derivation takes effect. After both + a window restart, AlphaWave appears as `dell-xps-alphawave`/`-trade`, distinct from BullseyeNotify.
+
+---
+
+### #44 Hide `-bot` waiter from the Clients UI · XS · P1 · OPEN
+
+**Reported (Meni 2026-06-08).** *"-bot client is meaningless to me!! why do we need to expose at all to the user?!?"* The notify-watch auto-responder (`…-bot` long-poll waiter) is shown as a row in the Clients tab (`/api/clients`, [ui/server.ts](ui/server.ts)). #37 already removed it from the addressable `list clients`; this removes it from the UI tab too. It keeps RECEIVING broadcasts (delivery unchanged) — just not displayed.
+
+**Plan.** In `/api/clients`, exclude any tag ending in `-bot` from the returned client list (the waiter `extra` loop + defensively the session/SSE loops). Add an integration test asserting a parked `-bot` waiter is absent from `/api/clients`.
 
 ---
 
@@ -44,6 +55,14 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-09 03:42 — #42 per-panel "Invalidate this panel" endpoint + button
+
+**Shipped** the worthwhile piece of #39's recommendation (the naive tag+host dedup hint stays rejected). **Server** ([ui/server.ts](ui/server.ts)): new `POST /api/clients/:tag/panel/:sessionId/reconnect` closes ONLY the MCP session whose 8-char id matches `:sessionId` (`httpTransports[sid].close()` + `delete sessions[sid]`), leaving sibling panels of the same tag connected. **UI** ([ui/public/app.js](ui/public/app.js)): per-panel **"Invalidate panel"** button shown when `panelCount > 1 && sessionId`, wired to `invalidatePanel(tag, sessionId)`; the panel badge now also shows each panel's `conn <N>m` age so an orphan (divergent connect time) stands out.
+
+**Verify (verified).** New integration test `per-panel invalidate drops only the targeted session, siblings survive` ([tests/smoke.test.mjs](tests/smoke.test.mjs), test 16): opens 2 same-tag sessions, invalidates ONE by its `sessionId` → response `closed:1`, then `/api/clients` shows the victim gone and the sibling still present. `npm run build` EXIT 0; `node --test` → **16/16 pass**. **Activation:** server route needs the UI server restarted; the static button shows on browser refresh.
 
 ---
 

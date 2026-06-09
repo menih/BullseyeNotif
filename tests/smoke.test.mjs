@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -493,4 +493,47 @@ test("per-panel invalidate drops only the targeted session, siblings survive", a
   const ids = panels.map(p => p.sessionId);
   assert.ok(!ids.includes(victim), `victim ${victim} should be gone, got ${JSON.stringify(ids)}`);
   assert.ok(ids.includes(survivor), `survivor ${survivor} should remain, got ${JSON.stringify(ids)}`);
+});
+
+// #44 — the -bot auto-responder waiter must NOT appear in the UI Clients tab.
+test("/api/clients hides a -bot waiter, keeps real panels", async () => {
+  const tag = "uibotfilter";
+  await initTaggedSession(tag);
+  const botTag = "uibotfilter-bot";
+  const waiterP = fetch(`http://localhost:${port}/api/agent/inbox/wait?timeout_seconds=5&tag=${botTag}`).catch(() => {});
+  await new Promise(r => setTimeout(r, 300));
+  const { clients } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const tags = clients.map(c => c.tag);
+  assert.ok(tags.includes(tag), `real client ${tag} should show, got ${JSON.stringify(tags)}`);
+  assert.ok(!tags.includes(botTag), `-bot waiter should be hidden from UI, got ${JSON.stringify(tags)}`);
+  await waiterP;
+});
+
+// #43 — with NOTIFY_MCP_TAG unset, the bridge self-tags from CLAUDE_PROJECT_DIR
+// (the per-workspace dir Claude Code passes), so each window registers distinctly.
+test("bridge self-tags from CLAUDE_PROJECT_DIR when NOTIFY_MCP_TAG is unset", { timeout: 20_000 }, async () => {
+  const fixtureParent = mkdtempSync(join(tmpdir(), "awderive-"));
+  const fixture = join(fixtureParent, "awderivetest");
+  mkdirSync(fixture, { recursive: true });
+  const child = spawn(process.execPath, [STDIO_BRIDGE], {
+    env: { ...process.env, NOTIFY_MCP_PORT: String(port), NOTIFY_MCP_TAG: "", CLAUDE_PROJECT_DIR: fixture },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  child.stderr.on("data", () => {});
+  child.stdout.on("data", () => {});
+  const send = (o) => child.stdin.write(JSON.stringify(o) + "\n");
+  await new Promise(r => setTimeout(r, 800));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_dnd_status", arguments: {} } });
+  let found = false;
+  for (let i = 0; i < 24 && !found; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    const { clients } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+    found = clients.some(c => typeof c.tag === "string" && c.tag.endsWith("-awderivetest"));
+  }
+  child.kill("SIGKILL");
+  await once(child, "exit").catch(() => {});
+  rmSync(fixtureParent, { recursive: true, force: true });
+  assert.ok(found, "bridge should self-tag from CLAUDE_PROJECT_DIR basename when NOTIFY_MCP_TAG is empty");
 });

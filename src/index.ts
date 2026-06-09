@@ -37,10 +37,12 @@ const PORT = process.env.NOTIFY_MCP_PORT ? parseInt(process.env.NOTIFY_MCP_PORT)
 const BASE = `http://localhost:${PORT}`;
 const CLEAN_ID = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]/g, "");
 
-// NOTIFY_MCP_TAG is the explicit per-window name; otherwise use the nearest
-// meaningful working-dir folder, skipping generic launcher/tool/system dirs so a
-// bridge spawned from an editor's launch dir names itself after the project
-// (e.g. "bullseyenotify"), never the host ("claude-code").
+// NOTIFY_MCP_TAG is the explicit per-window name; otherwise derive from the
+// workspace Claude Code passes (CLAUDE_PROJECT_DIR) — falling back to the launch
+// dir — and walk up to the nearest meaningful folder, skipping generic launcher/
+// tool/system dirs so each window names itself after its project (e.g.
+// "bullseyenotify" / "alphawave"), never the host ("claude-code"). Using
+// CLAUDE_PROJECT_DIR is what lets one globally-wired bridge self-tag per window.
 function deriveVscId(): string {
   const explicit = CLEAN_ID(process.env.NOTIFY_MCP_TAG ?? "");
   if (explicit) return explicit;
@@ -49,7 +51,8 @@ function deriveVscId(): string {
     "bin", "dist", "build", "src", "out", "node_modules",
     "windows", "system32", "users", "appdata", "roaming", "local", "programs", "temp", "tmp",
   ]);
-  let dir = process.cwd();
+  const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  let dir = root;
   for (let i = 0; i < 5; i++) {
     const name = CLEAN_ID(basename(dir));
     if (name && !generic.has(name)) return name;
@@ -57,7 +60,7 @@ function deriveVscId(): string {
     if (!parent || parent === dir) break;
     dir = parent;
   }
-  return CLEAN_ID(basename(process.cwd())) || "agent";
+  return CLEAN_ID(basename(root)) || "agent";
 }
 
 const VSC_ID = deriveVscId();
