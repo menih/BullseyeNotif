@@ -37,6 +37,18 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### 2026-06-09 13:11 — #46 fold subagent sessions into one interactive panel
+
+**Ask (Meni 2026-06-09).** Count only INTERACTIVE clients in `/api/clients` — a subagent (Task tool) spawns its own `claude.exe` → its own `dist/index.js` bridge → inflated AW to 2 panels for 1 visible panel. Meni preferred "prevent the subagent from connecting at all."
+
+**Signal (verified empirically + claude-code-guide).** No env var / `initialize` field flags a subagent — only `CLAUDECODE=1` (every Claude subprocess). So a hard pre-connect refusal is impossible. BUT a subagent **shares its parent's `CLAUDE_CODE_SESSION_ID`** — proven by spawning a Task subagent that dumped the SAME `CLAUDE_CODE_SESSION_ID=2349a3f3…` as its interactive parent. (Config-side alt covers CUSTOM `.claude/agents/*.md` only via `mcpServers:` frontmatter — NOT built-in Task agents.)
+
+**Fixed.** Bridge ([src/index.ts](src/index.ts)) sends `?hsid=<CLAUDE_CODE_SESSION_ID>` on `/mcp` (new `HOST_SESSION_ID` + `MCP_QUERY`). Server ([ui/server.ts](ui/server.ts)) stores `hostSessionId` per session ([SessionMeta] + `/mcp` query read) and `/api/clients` folds sessions sharing a `(tag, hostSessionId)` into ONE panel — keeps the oldest (interactive, connects first), drops later same-hsid (subagents). No-hsid sessions (Cursor/Codex/pre-#46 bridges) stay one-per-session.
+
+**Verify (verified).** New integration test 20 `/api/clients folds same-session-id subagents into one interactive panel` ([tests/smoke.test.mjs](tests/smoke.test.mjs)): two same-`(tag,hsid)` sessions → 1 panel (`panelCount=1`); a distinct `hsid` → 2 panels. `npm run build` EXIT 0; `node --test` → **20/20 pass** (test 2's no-hsid same-tag pair still shows 2, unchanged). **Activation (disclosed):** live bridges run pre-#46 code (no hsid) — verified live `/api/clients` still shows AW=2 until Meni's windows reload and bridges re-spawn sending hsid. Mechanism proven by test 20. **Note:** the subagent bridge still connects (no pre-connect signal exists) — it's folded from the count/display, not blocked; it can still receive inbox pushes (a separate concern if Meni wants subagents fully excluded).
+
+---
+
 ### 2026-06-09 06:24 — #45 bridge self-exits when its claude.exe peer dies
 
 **Root cause (verified live, process tree).** Meni: 1 AW panel + 1 BN panel, but `/api/clients` showed AW=**2 panels**. His AW VSCode window (`Code.exe` 26124) held TWO `claude.exe` — fresh `27524` + `--resume e9e49e9e-1a1a-4441-92eb-6f5b97644d38` session-restore ghost `61712` — each spawning a `dist/index.js` bridge (`dell-xps-alphawave` + `-2`). VSCode session-restore artifact. The DURABLE defect was ours: the bridge never exited on stdio-peer loss — `startSessionKeepalive()` (30s) + `subscribeInbox()` keep the event loop alive, so an orphaned bridge heartbeats forever, `lastSeen` never goes stale, the 90s reaper never fires → phantom panel lingers indefinitely.

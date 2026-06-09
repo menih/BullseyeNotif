@@ -843,10 +843,24 @@ app.get("/api/clients", (_req, res) => {
   pruneDeadSessions();
   const now = Date.now();
   const isBot = (t?: string) => !!t && t.endsWith("-bot");
-  const active = Object.entries(sessions)
+  const allActive = Object.entries(sessions)
     .map(([sid, s]) => ({ sid, ...s }))
     .filter(s => !isBot(s.tag))
     .sort((a, b) => a.connectedAt - b.connectedAt);
+  // Fold subagents into their interactive parent. A subagent (Task tool) shares
+  // its parent's CLAUDE_CODE_SESSION_ID, so multiple bridges with the same
+  // (tag, hostSessionId) are one interactive panel + its subagents — keep the
+  // oldest (the interactive session, which connects first) and drop the rest so
+  // subagents never inflate the clients tab. Sessions with no hostSessionId
+  // (non-Claude hosts / pre-#46 bridges) stay one-per-session.
+  const seenHostSession = new Set<string>();
+  const active = allActive.filter(s => {
+    if (!s.hostSessionId) return true;
+    const key = `${s.tag ?? s.clientId}::${s.hostSessionId}`;
+    if (seenHostSession.has(key)) return false;
+    seenHostSession.add(key);
+    return true;
+  });
   const panelTotals = new Map<string, number>();
   for (const s of active) {
     const key = s.tag ?? s.clientId;
@@ -2408,6 +2422,7 @@ interface SessionMeta {
   clientVersion?: string;
   workspaceName?: string; // workspace folder name (e.g. "AlphaWave")
   host?: string;         // remote address of the client
+  hostSessionId?: string; // CLAUDE_CODE_SESSION_ID — shared by a session + its subagents
   connectedAt: number;
   lastSeen: number;      // last time we saw any request from this session
 }
@@ -2557,6 +2572,8 @@ app.all("/mcp", async (req, res) => {
 
   const rawTag = typeof req.query.tag === "string" ? req.query.tag : undefined;
   const sessionTag = rawTag?.toLowerCase().replace(/[^a-z0-9_-]/g, "") || undefined;
+  const rawHsid = typeof req.query.hsid === "string" ? req.query.hsid : undefined;
+  const hostSessionId = rawHsid?.replace(/[^a-zA-Z0-9_-]/g, "") || undefined;
   // If the client brought a stale id on an initialize, reuse it so the client
   // never has to swap ids. Otherwise mint a fresh one.
   const newSessionId = existingSessionId ?? randomUUID();
@@ -2610,7 +2627,7 @@ app.all("/mcp", async (req, res) => {
     httpTransports[transport.sessionId] = transport;
     const now = Date.now();
     sessions[transport.sessionId] = {
-      clientId, tag: sessionTag, host, connectedAt: now, lastSeen: now,
+      clientId, tag: sessionTag, host, hostSessionId, connectedAt: now, lastSeen: now,
       clientName: earlyClientName,
       clientVersion: initBody?.params?.clientInfo?.version,
       workspaceName,

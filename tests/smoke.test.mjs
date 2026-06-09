@@ -139,8 +139,13 @@ test.after(async () => {
 });
 
 // Open a tagged MCP session so the client shows up in /api/clients by that tag.
-async function initTaggedSession(tag) {
-  const r = await fetch(`http://localhost:${port}/mcp?tag=${encodeURIComponent(tag)}`, {
+// Pass hsid to simulate the CLAUDE_CODE_SESSION_ID a real bridge reports (shared
+// by an interactive session and its subagents).
+async function initTaggedSession(tag, hsid) {
+  const q = hsid
+    ? `?tag=${encodeURIComponent(tag)}&hsid=${encodeURIComponent(hsid)}`
+    : `?tag=${encodeURIComponent(tag)}`;
+  const r = await fetch(`http://localhost:${port}/mcp${q}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } }),
@@ -576,4 +581,24 @@ test("bridge exits and drops its session when stdin closes", { timeout: 20_000 }
     gone = !(await tagPresent());
   }
   assert.ok(gone, "session should disappear from /api/clients right after the bridge's stdin closes");
+});
+
+// #46 — a subagent (Task tool) shares its parent's CLAUDE_CODE_SESSION_ID, so
+// same-(tag, hsid) sessions fold into ONE interactive panel; a distinct hsid is
+// a genuinely separate interactive panel and still counts on its own.
+test("/api/clients folds same-session-id subagents into one interactive panel", async () => {
+  const tag = "subagentfoldtest";
+  const hsid = "aaaaaaaa-1111-2222-3333-444444444444";
+  await initTaggedSession(tag, hsid);  // interactive parent
+  await initTaggedSession(tag, hsid);  // subagent — same host session id
+  let panels = (await (await fetch(`http://localhost:${port}/api/clients`)).json())
+    .clients.filter(x => x.tag === tag);
+  assert.equal(panels.length, 1, `subagent should fold into the parent: expected 1 panel, got ${panels.length}`);
+  assert.equal(panels[0].panelCount, 1, `panelCount should be 1, got ${panels[0].panelCount}`);
+
+  // A second REAL interactive panel (distinct host session id) still counts.
+  await initTaggedSession(tag, "bbbbbbbb-5555-6666-7777-888888888888");
+  panels = (await (await fetch(`http://localhost:${port}/api/clients`)).json())
+    .clients.filter(x => x.tag === tag);
+  assert.equal(panels.length, 2, `distinct hsid is its own panel: expected 2, got ${panels.length}`);
 });

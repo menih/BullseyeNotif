@@ -67,6 +67,20 @@ const VSC_ID = deriveVscId();
 const SESSION_TAG = `${hostname().toLowerCase().replace(/[^a-z0-9_-]/g, "")}-${VSC_ID}`;
 const CLIENT_NAME = "claude-channel-bridge";
 
+// CLAUDE_CODE_SESSION_ID is shared by an interactive Claude session AND every
+// subagent (Task tool) it spawns — a spawned subagent inherits the parent's id
+// verbatim. Reporting it lets the server fold a main session + its subagents
+// into one interactive panel, so subagents don't inflate the clients tab. Empty
+// for non-Claude-Code hosts (Cursor/Codex) — those stay one-panel-per-bridge.
+const HOST_SESSION_ID = (process.env.CLAUDE_CODE_SESSION_ID || "").replace(/[^a-zA-Z0-9_-]/g, "");
+const MCP_QUERY = (() => {
+  const p = new URLSearchParams();
+  if (SESSION_TAG) p.set("tag", SESSION_TAG);
+  if (HOST_SESSION_ID) p.set("hsid", HOST_SESSION_ID);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+})();
+
 // ── 1. Ensure the HTTP server is up ───────────────────────────────────────────
 
 async function serverIsUp(): Promise<boolean> {
@@ -143,8 +157,7 @@ async function httpRpc(method: string, params?: unknown, isNotification = false)
     "Accept": "application/json, text/event-stream",
   };
   if (httpSessionId) headers["mcp-session-id"] = httpSessionId;
-  const tagQuery = SESSION_TAG ? `?tag=${encodeURIComponent(SESSION_TAG)}` : "";
-  const r = await fetch(`${BASE}/mcp${tagQuery}`, {
+  const r = await fetch(`${BASE}/mcp${MCP_QUERY}`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
