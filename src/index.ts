@@ -275,7 +275,30 @@ async function sendNotifyChunked(message: string, priority: string) {
   }
   const failed = results.find(r => r.isError);
   if (failed) return failed;
-  return { content: [{ type: "text" as const, text: `Delivered as ${chunks.length} chunks (${message.length} chars).` }] };
+
+  const texts = results.map(r => r.content?.[0]?.text ?? "");
+  const inboxMarker = "⚠️ USER SENT YOU A MESSAGE";
+  const inboxBlocks = texts
+    .map(t => { const i = t.indexOf(inboxMarker); return i === -1 ? null : t.slice(i); })
+    .filter((b): b is string => b !== null);
+  const inboxSuffix = inboxBlocks.length ? `\n\n${inboxBlocks.join("\n\n")}` : "";
+
+  const delivered = texts.filter(t => t.includes("Sent via:")).length;
+  const n = chunks.length;
+
+  let summary: string;
+  if (delivered === n) {
+    summary = `Delivered as ${n} chunks (${message.length} chars).`;
+  } else {
+    const stripInbox = (t: string) => { const i = t.indexOf(inboxMarker); return (i === -1 ? t : t.slice(0, i)).trim(); };
+    const failedSummaries = [...new Set(texts.filter(t => !t.includes("Sent via:")).map(stripInbox))];
+    const said = failedSummaries.map(s => `"${s}"`).join(", ");
+    summary = delivered === 0
+      ? `Suppressed — 0 of ${n} chunks reached any channel. Server said: ${said}`
+      : `Delivered ${delivered}/${n} chunks (${message.length} chars); ${n - delivered} reached no channel — server said: ${said}.`;
+  }
+
+  return { content: [{ type: "text" as const, text: `${summary}${inboxSuffix}` }] };
 }
 
 server.tool(

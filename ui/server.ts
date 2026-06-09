@@ -2103,7 +2103,7 @@ BEHAVIORAL RULES for every client that connects:
 `.trim();
 
 function createMcpServer(clientId: string, sessionTag?: string) {
-  const identity = sessionTag ? `@${sessionTag}` : clientId;
+  const identity = `@${clientId}`;
   const identityLine = `\nYOUR SESSION IDENTITY: "${identity}" — use this as your prefix in all notify replies (e.g. "[${identity}] done with build").\n`;
   const server = new McpServer(
     { name: "notify-mcp", version: "1.0.0" },
@@ -2122,7 +2122,7 @@ function createMcpServer(clientId: string, sessionTag?: string) {
         .describe("low=email only; normal=desktop+telegram+email; high=all channels"),
     },
     async ({ message, priority }: { message: string; priority: "low" | "normal" | "high" }) => {
-      const outbound = sessionTag ? `[${sessionTag}] ${message}` : message;
+      const outbound = `[${clientId}] ${message}`;
       const summary = await sendNotification(outbound, priority, clientId);
       const messages = drainInboxFor(sessionTag);
       if (messages.length === 0) {
@@ -2151,7 +2151,7 @@ function createMcpServer(clientId: string, sessionTag?: string) {
 
       log("→", "ask:telegram", question, clientId);
       if (cfg.telegram?.enabled && cfg.telegram.token && cfg.telegram.chatId) {
-        const askPrefix = sessionTag ? `❓ [${sessionTag}]` : `❓ [${clientId}]`;
+        const askPrefix = `❓ [${clientId}]`;
         const replyHint = sessionTag
           ? `\n\nReply with: @${sessionTag} <your answer>`
           : `\n\nReply to this message with your answer.`;

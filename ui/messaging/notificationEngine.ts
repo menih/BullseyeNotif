@@ -85,13 +85,11 @@ export async function sendWithRouting(options: {
   if (mode.suppressedReason === "dnd") {
     return { delivered: [], errors: [], suppressedReason: "DND active" };
   }
-  if (mode.suppressedReason === "idle") {
-    return { delivered: [], errors: [], suppressedReason: "Idle gated while active" };
-  }
 
   const delivered: string[] = [];
   const errors: string[] = [];
-  const desktopOnly = mode.desktopOnly;
+  // Idle gating downgrades to desktop-only; Slack (vsc_notif channel-log) is exempt below.
+  const desktopOnly = mode.desktopOnly || mode.suppressedReason === "idle";
 
   const trySend = async (name: string, fn: (() => Promise<void>) | undefined): Promise<void> => {
     if (!fn) return;
@@ -125,7 +123,7 @@ export async function sendWithRouting(options: {
     await trySend("discord", senders.discord ? () => senders.discord!(message, priority) : undefined);
   }
 
-  if (!desktopOnly && enableSlack) {
+  if (enableSlack) {
     await trySend("slack", senders.slack ? () => senders.slack!(message, priority) : undefined);
   }
 

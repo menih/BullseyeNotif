@@ -76,6 +76,22 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### 2026-06-09 03:18 — #41 Remove Save buttons — auto-save on change
+
+**Removed** all 9 per-card **Save** buttons from [ui/public/index.html](ui/public/index.html) (email, telegram, sms, ntfy, discord, slack, teams, dnd, idle); the Desktop card already auto-saved. Every card's inputs now persist immediately, mirroring Desktop:
+- **Checkboxes / `<select>` / `<input type=time>` → `onchange="save<Card>()"`:** email-enabled, telegram-enabled, sms-enabled, ntfy-enabled, discord-enabled, slack-enabled, teams-enabled, dnd-enabled, dnd-schedule-enabled, dnd-quiet-start/end, the 7 DND day checkboxes, idle-enabled, idle-always-desktop.
+- **Text / password / number / url / email → debounced `oninput="save<Card>Debounced()"` (400ms):** gmail-to-connected, telegram-token, telegram-chatid, sms-sid/token/from/to, ntfy-server-url, ntfy-topic, discord-webhook, discord-username, slack-webhook, teams-webhook, idle-threshold.
+
+**[app.js](ui/public/app.js):** deleted the `dirty` Set + `markDirty`/`clearDirty` machinery and the 7 standalone `toggle<Card>Enabled` handlers (full `save<Card>()` now patches enabled+credentials together); stripped all `clearDirty(...)` calls from save functions. Added one generic `debounce(fn, 400)` helper + 8 `save<Card>Debounced` const wrappers. `detectChatId` now calls `await saveTelegram()` (was `markDirty`). Each `save<Card>()` still routes through `patch()`, which toasts "Saved"/"Save failed" — feedback preserved, debounce keeps it non-spammy.
+
+**[style.css](ui/public/style.css):** deleted the now-dead `.btn-primary.dirty::after { content: " •"; }` rule + its section comment. `.btn-primary` base/hover kept (Connect button still uses it).
+
+**Non-Save buttons intact:** Test, Test sound, Test voice, Detect, Copy, Connect (saveAppPassword), Open Google Account, Clear, log/clients tabs, card toggles — all 29 handlers verified present.
+
+**Verify.** Static assets (no build). Open the config UI, expand any non-Desktop card, toggle a checkbox or edit a field → toast "Saved" fires (debounced ~400ms for text) with NO Save button present; reload page → value persists. `grep -n 'id="save-\|markDirty\|clearDirty\|dirty\|toggle.*Enabled'` over `ui/public/` returns 0 matches.
+
+---
+
 ### 2026-06-08 19:55 — #37 hide `-bot` waiter from addressable list
 
 **Problem (Meni).** Slack `list clients` listed `dell-xps-bullseyenotify-bot` (the notify-watch auto-responder — waiter-only, tag hardcoded `…-bot` at [notify-watch.sh:8](notify-watch.sh#L8)) as addressable client **#2**. Meaningless to `@`-address.

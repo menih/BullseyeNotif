@@ -688,6 +688,4 @@ p.hint code {
 .toast.toast-error { background: #7f1d1d; }
 .toast.hidden { opacity: 0; pointer-events: none; transform: translateX(-50%) translateY(8px); }
 
-/* ── Dirty marker ────────────────────────────────────────────────────────── */
-.btn-primary.dirty::after { content: " •"; }
 .hidden { display: none !important; }

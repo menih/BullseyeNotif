@@ -1,7 +1,6 @@
 // ── State ─────────────────────────────────────────────────────────────────
 
 let config = {};
-const dirty = new Set();
 
 // ── Card collapse/expand ──────────────────────────────────────────────────
 
@@ -259,33 +258,6 @@ async function saveEmail() {
   const to = $("gmail-to-connected").value.trim();
   const enabled = $("email-enabled").checked;
   await patch({ email: { to, enabled } });
-  clearDirty("email");
-}
-
-// Standalone enable-toggle handlers: persist immediately without requiring a
-// Save-button click. Credentials still need the explicit Save flow, but the
-// on/off switch auto-persists so users aren't left wondering why their
-// toggle "snapped back" after a reload.
-async function toggleTelegramEnabled() {
-  await patch({ telegram: { enabled: $("telegram-enabled").checked } });
-}
-async function toggleEmailEnabled() {
-  await patch({ email: { enabled: $("email-enabled").checked } });
-}
-async function toggleSmsEnabled() {
-  await patch({ sms: { enabled: $("sms-enabled").checked } });
-}
-async function toggleNtfyEnabled() {
-  await patch({ ntfy: { enabled: $("ntfy-enabled").checked } });
-}
-async function toggleDiscordEnabled() {
-  await patch({ discord: { enabled: $("discord-enabled").checked } });
-}
-async function toggleSlackEnabled() {
-  await patch({ slack: { enabled: $("slack-enabled").checked } });
-}
-async function toggleTeamsEnabled() {
-  await patch({ teams: { enabled: $("teams-enabled").checked } });
 }
 
 async function saveTelegram() {
@@ -296,7 +268,6 @@ async function saveTelegram() {
       chatId: $("telegram-chatid").value.trim(),
     },
   });
-  clearDirty("telegram");
 }
 
 async function detectChatId() {
@@ -307,7 +278,7 @@ async function detectChatId() {
     const json = await res.json();
     if (!res.ok) throw new Error(json.error);
     $("telegram-chatid").value = json.chatId;
-    markDirty("telegram");
+    await saveTelegram();
     toast("Chat ID detected: " + json.chatId, "ok");
   } catch (e) {
     toast("" + e, "error");
@@ -330,7 +301,6 @@ async function saveDnd() {
       },
     },
   });
-  clearDirty("dnd");
 }
 
 async function saveIdle() {
@@ -342,7 +312,6 @@ async function saveIdle() {
       alwaysDesktopWhenActive: $("idle-always-desktop").checked,
     },
   });
-  clearDirty("idle");
 }
 
 async function saveSms() {
@@ -355,12 +324,10 @@ async function saveSms() {
       to: $("sms-to").value.trim(),
     },
   });
-  clearDirty("sms");
 }
 
 async function saveNtfy() {
   await patch({ ntfy: { enabled: $("ntfy-enabled").checked, topic: $("ntfy-topic").value.trim(), serverUrl: $("ntfy-server-url").value.trim() } });
-  clearDirty("ntfy");
 }
 
 function copyNtfyUrl() {
@@ -369,15 +336,12 @@ function copyNtfyUrl() {
 }
 async function saveDiscord() {
   await patch({ discord: { enabled: $("discord-enabled").checked, webhookUrl: $("discord-webhook").value.trim(), username: $("discord-username").value.trim() || "Claude Notify" } });
-  clearDirty("discord");
 }
 async function saveSlack() {
   await patch({ slack: { enabled: $("slack-enabled").checked, webhookUrl: $("slack-webhook").value.trim() } });
-  clearDirty("slack");
 }
 async function saveTeams() {
   await patch({ teams: { enabled: $("teams-enabled").checked, webhookUrl: $("teams-webhook").value.trim() } });
-  clearDirty("teams");
 }
 
 async function patch(update) {
@@ -596,19 +560,24 @@ function renderOsHint() {
   }
 }
 
-// ── Dirty tracking ────────────────────────────────────────────────────────
+// ── Debounced auto-save ───────────────────────────────────────────────────
 
-function markDirty(section) {
-  dirty.add(section);
-  const btn = $("save-" + section + "-btn");
-  if (btn) btn.classList.add("dirty");
+function debounce(fn, ms = 400) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
 }
 
-function clearDirty(section) {
-  dirty.delete(section);
-  const btn = $("save-" + section + "-btn");
-  if (btn) btn.classList.remove("dirty");
-}
+const saveEmailDebounced = debounce(saveEmail);
+const saveTelegramDebounced = debounce(saveTelegram);
+const saveSmsDebounced = debounce(saveSms);
+const saveNtfyDebounced = debounce(saveNtfy);
+const saveDiscordDebounced = debounce(saveDiscord);
+const saveSlackDebounced = debounce(saveSlack);
+const saveTeamsDebounced = debounce(saveTeams);
+const saveIdleDebounced = debounce(saveIdle);
 
 // ── Toast ─────────────────────────────────────────────────────────────────
 

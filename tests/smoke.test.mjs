@@ -366,3 +366,112 @@ test("stdio bridge initializes, advertises claude/channel, lists tools", { timeo
   // reply is the stdio-only channels return tool; others match the HTTP set.
   assert.deepEqual(names, ["ask", "get_dnd_status", "get_idle_config", "get_idle_seconds", "notify", "poll", "reply", "update_instructions", "wait_for_inbox"]);
 });
+
+// #36 — two panels of the same VSC window (same tag) must each get a distinct
+// per-panel identity in their initialize instructions, matching the /api/clients id.
+async function initInstructions(tag) {
+  const r = await fetch(`http://localhost:${port}/mcp?tag=${encodeURIComponent(tag)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } }),
+  });
+  const ctype = r.headers.get("content-type") ?? "";
+  const raw = await r.text();
+  if (ctype.includes("application/json")) return JSON.parse(raw).result.instructions;
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith("data:")) return JSON.parse(line.slice(5).trim()).result.instructions;
+  }
+  throw new Error("no initialize body");
+}
+
+test("same-tag panels get distinct per-panel identity in instructions", async () => {
+  const tag = "identitytest";
+  const i1 = await initInstructions(tag);
+  const i2 = await initInstructions(tag);
+  assert.match(i1, /YOUR SESSION IDENTITY: "@identitytest"/);
+  assert.match(i2, /YOUR SESSION IDENTITY: "@identitytest-2"/);
+  assert.notEqual(i1, i2, "per-panel identity lines should differ");
+});
+
+// #38 — a multi-chunk notify that reaches no channel must report suppression,
+// not a false "Delivered as N chunks". All channels are disabled by default.
+test("bridge reports suppression when a multi-chunk notify reaches no channel", { timeout: 20_000 }, async () => {
+  const child = spawn(process.execPath, [STDIO_BRIDGE], {
+    env: { ...process.env, NOTIFY_MCP_PORT: String(port) },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  child.stderr.on("data", () => {});
+  let buf = "";
+  const lines = [];
+  const want = (id) => lines.map(l => JSON.parse(l)).find(m => m.id === id);
+  const gotNotify = new Promise((resolve) => {
+    child.stdout.on("data", (chunk) => {
+      buf += chunk.toString();
+      let i;
+      while ((i = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (line) lines.push(line);
+      }
+      if (want(2)) resolve();
+    });
+  });
+  const send = (o) => child.stdin.write(JSON.stringify(o) + "\n");
+  await new Promise(r => setTimeout(r, 800));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const longMsg = "word ".repeat(300).trim(); // ~1500 chars → several chunks
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "notify", arguments: { message: longMsg, priority: "normal" } } });
+
+  await Promise.race([
+    gotNotify,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("no notify response in 15s")), 15_000)),
+  ]);
+  child.kill("SIGKILL");
+  await once(child, "exit").catch(() => {});
+
+  const resp = want(2);
+  assert.ok(resp, "no notify response");
+  const text = resp.result.content[0].text;
+  assert.match(text, /Suppressed — 0 of \d+ chunks reached any channel/, `expected honest suppression, got: ${text}`);
+  assert.doesNotMatch(text, /Delivered as \d+ chunks/, `must not falsely claim delivery: ${text}`);
+});
+
+// #40 — a normal-priority notify that is idle-gated to desktop-only must STILL
+// reach Slack (vsc_notif channel-log exemption). Force UI active so the gate
+// fires, point the Slack webhook at a local capture server, assert it's hit.
+test("normal-priority notify reaches Slack even while idle-gated", async () => {
+  await fetch(`http://localhost:${port}/api/ui/visibility`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ visible: true }),
+  });
+  const { createServer } = await import("node:http");
+  let slackHits = 0;
+  let lastBody = "";
+  const capture = createServer((req, res) => {
+    let b = "";
+    req.on("data", d => { b += d; });
+    req.on("end", () => { slackHits++; lastBody = b; res.writeHead(200); res.end("ok"); });
+  });
+  await new Promise(r => capture.listen(0, r));
+  const slackUrl = `http://localhost:${capture.address().port}/hook`;
+  try {
+    await fetch(`http://localhost:${port}/api/config`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ desktop: { enabled: false }, slack: { enabled: true, webhookUrl: slackUrl }, idle: { enabled: true, thresholdSeconds: 120, alwaysDesktopWhenActive: true } }),
+    });
+    const c = createHttpClient(port);
+    await c.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+    await c.rpc("notifications/initialized");
+    const r = await c.rpc("tools/call", { name: "notify", arguments: { message: "idle-exempt slack check", priority: "normal" } });
+    const text = r.body.result.content[0].text;
+    assert.match(text, /Sent via:[^|]*slack/, `slack should deliver under idle gating, got: ${text}`);
+    assert.equal(slackHits, 1, `slack webhook should be hit exactly once, got ${slackHits}`);
+    assert.match(lastBody, /idle-exempt slack check/, "slack payload should carry the message");
+  } finally {
+    await fetch(`http://localhost:${port}/api/config`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slack: { enabled: false, webhookUrl: "" }, desktop: { enabled: false } }),
+    }).catch(() => {});
+    capture.close();
+  }
+});
