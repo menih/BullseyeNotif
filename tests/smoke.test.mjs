@@ -537,3 +537,43 @@ test("bridge self-tags from CLAUDE_PROJECT_DIR when NOTIFY_MCP_TAG is unset", { 
   rmSync(fixtureParent, { recursive: true, force: true });
   assert.ok(found, "bridge should self-tag from CLAUDE_PROJECT_DIR basename when NOTIFY_MCP_TAG is empty");
 });
+
+// #45 — when the bridge's stdio peer (claude.exe) closes stdin (window/panel
+// closed), the bridge must DELETE its /mcp session and exit, so the phantom
+// panel disappears from the clients tab immediately instead of lingering via
+// the 30s keepalive forever.
+test("bridge exits and drops its session when stdin closes", { timeout: 20_000 }, async () => {
+  const child = spawn(process.execPath, [STDIO_BRIDGE], {
+    env: { ...process.env, NOTIFY_MCP_PORT: String(port), NOTIFY_MCP_TAG: "peerlosstest" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  child.stderr.on("data", () => {});
+  child.stdout.on("data", () => {});
+  const send = (o) => child.stdin.write(JSON.stringify(o) + "\n");
+  await new Promise(r => setTimeout(r, 800));
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_dnd_status", arguments: {} } });
+
+  const tagPresent = async () => {
+    const { clients } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+    return clients.some(c => typeof c.tag === "string" && c.tag.endsWith("-peerlosstest"));
+  };
+  let registered = false;
+  for (let i = 0; i < 24 && !registered; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    registered = await tagPresent();
+  }
+  assert.ok(registered, "bridge should register before we close its stdin");
+
+  // Close stdin = parent process gone. Bridge should DELETE its session + exit.
+  child.stdin.end();
+  await once(child, "exit");
+
+  let gone = false;
+  for (let i = 0; i < 16 && !gone; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    gone = !(await tagPresent());
+  }
+  assert.ok(gone, "session should disappear from /api/clients right after the bridge's stdin closes");
+});

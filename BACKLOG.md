@@ -37,13 +37,23 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### 2026-06-09 06:24 — #45 bridge self-exits when its claude.exe peer dies
+
+**Root cause (verified live, process tree).** Meni: 1 AW panel + 1 BN panel, but `/api/clients` showed AW=**2 panels**. His AW VSCode window (`Code.exe` 26124) held TWO `claude.exe` — fresh `27524` + `--resume e9e49e9e-1a1a-4441-92eb-6f5b97644d38` session-restore ghost `61712` — each spawning a `dist/index.js` bridge (`dell-xps-alphawave` + `-2`). VSCode session-restore artifact. The DURABLE defect was ours: the bridge never exited on stdio-peer loss — `startSessionKeepalive()` (30s) + `subscribeInbox()` keep the event loop alive, so an orphaned bridge heartbeats forever, `lastSeen` never goes stale, the 90s reaper never fires → phantom panel lingers indefinitely.
+
+**Fixed** ([src/index.ts](src/index.ts) `main()` + new `shutdownOnPeerLoss`). On `process.stdin` `end`/`close` (EOF = parent gone) the bridge best-effort `DELETE`s its `/mcp` session (instant removal) then `process.exit(0)`. A closed window/panel now vanishes from the clients tab immediately instead of never.
+
+**Verify (verified).** New integration test 19 `bridge exits and drops its session when stdin closes` ([tests/smoke.test.mjs](tests/smoke.test.mjs)): spawns the real bridge (`NOTIFY_MCP_TAG=peerlosstest`), polls `/api/clients` until `-peerlosstest` registers, calls `child.stdin.end()`, awaits process exit, then polls until the tag disappears. `npm run build:mcp` EXIT 0; `node --test` → **19/19 pass** (existing 18 unchanged — bridge stays alive while stdin is held open). **Activation:** live bridges keep old code until they re-spawn (window reload); the fix engages on the next bridge spawn. **Does NOT reduce a count while both `claude.exe` are alive** — a live `--resume` duplicate is a Claude Code/VSCode session-restore behavior, not removable server-side; it only stops the *lingering* after one ends.
+
+---
+
 ### 2026-06-09 04:05 — #43 AlphaWave (every workspace) mislabeled `bullseyenotify`
 
 **Root cause (verified, not guessed).** Notify MCP is wired GLOBALLY (top-level `mcpServers`, [~/.claude.json](file:///c:/Users/menih/.claude.json)) with a HARDCODED `env.NOTIFY_MCP_TAG: "bullseyenotify"`. `deriveVscId()` returns the explicit tag first ([src/index.ts:45](src/index.ts#L45)), so EVERY window's bridge — AlphaWave included — self-tagged `bullseyenotify` and collapsed into one client. AlphaWave WAS connected, just mislabeled; the "3 panels I don't have" were panels from different windows (BullseyeNotify + AlphaWave + a `--resume` panel per #39) all forced under one tag. Confirmed: all 3 live bridges run `BullseyeNotify/dist/index.js`; `/api/clients` showed only `dell-xps-bullseyenotify`.
 
 **Fixed (two parts).** **(a) Code** ([src/index.ts](src/index.ts)) — `deriveVscId()` now derives from `CLAUDE_PROJECT_DIR` (the per-workspace dir Claude Code sets) before `process.cwd()`, so one globally-wired bridge self-tags per window. **(b) Config** ([~/.claude.json](file:///c:/Users/menih/.claude.json)) — removed the hardcoded `env.NOTIFY_MCP_TAG` from the global notify block (JSON re-validated). Each window now self-tags by its real project.
 
-**Verify (verified).** Test 18 `bridge self-tags from CLAUDE_PROJECT_DIR when NOTIFY_MCP_TAG is unset` ([tests/smoke.test.mjs](tests/smoke.test.mjs)): spawns the bridge with `CLAUDE_PROJECT_DIR=…/awderivetest` + empty `NOTIFY_MCP_TAG` → `/api/clients` shows a client tagged `…-awderivetest`. `npm run build` EXIT 0; `node --test` → **18/18 pass**. Config JSON re-parsed clean. **Operator-verify (activation needs restart):** restart/reload the VSC windows → AlphaWave appears as `dell-xps-alphawave` (or `-trade`), distinct from `dell-xps-bullseyenotify`; the UI server must also restart to serve the rebuilt bridge users connect through.
+**Verify (verified).** Test 18 `bridge self-tags from CLAUDE_PROJECT_DIR when NOTIFY_MCP_TAG is unset` ([tests/smoke.test.mjs](tests/smoke.test.mjs)): spawns the bridge with `CLAUDE_PROJECT_DIR=…/awderivetest` + empty `NOTIFY_MCP_TAG` → `/api/clients` shows a client tagged `…-awderivetest`. `npm run build` EXIT 0; `node --test` → **18/18 pass**. Config JSON re-parsed clean. **Operator-verify (activation needs restart):** restart/reload the VSC windows → AlphaWave appears as `dell-xps-alphawave` (or `-trade`), distinct from `dell-xps-bullseyenotify`; the UI server must also restart to serve the rebuilt bridge users connect through. **✅ LIVE-CONFIRMED 2026-06-09 06:10** — AlphaWave window reloaded → live `/api/clients` shows `dell-xps-alphawave` (2 panels, connAt 06:10:36Z), distinct from `dell-xps-bullseyenotify-3`. Operator-verify satisfied.
 
 ---
 

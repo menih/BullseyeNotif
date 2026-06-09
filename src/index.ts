@@ -468,6 +468,30 @@ async function emitChannelEvent(entry: InboxEvent): Promise<void> {
 
 // ── 5. Wire it up ────────────────────────────────────────────────────────────
 
+// When the parent (claude.exe / Cursor / Codex) dies, the OS closes our stdin
+// pipe and the stdio transport reaches EOF. Without exiting here the bridge
+// lives on: startSessionKeepalive() keeps pinging /mcp every 30s, so the
+// server's lastSeen never goes stale and the 90s reaper never removes the
+// session — a closed window leaves a phantom "panel" in the clients tab
+// forever. On EOF we DELETE our /mcp session (instant server-side removal) and
+// exit so the panel disappears immediately.
+let shuttingDown = false;
+async function shutdownOnPeerLoss(why: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stderr(`[bridge] ${why} — closing /mcp session and exiting`);
+  if (httpSessionId) {
+    try {
+      await fetch(`${BASE}/mcp`, {
+        method: "DELETE",
+        headers: { "mcp-session-id": httpSessionId },
+        signal: AbortSignal.timeout(2000),
+      });
+    } catch { /* server may already be gone; the reaper will clear it */ }
+  }
+  process.exit(0);
+}
+
 async function main(): Promise<void> {
   if (!(await serverIsUp())) {
     spawnUiServerIfNeeded();
@@ -486,6 +510,10 @@ async function main(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // EOF on stdin = the parent process is gone. Tear down so we don't linger as
+  // an orphan heartbeating a phantom panel.
+  process.stdin.on("end", () => { void shutdownOnPeerLoss("stdin ended (parent gone)"); });
+  process.stdin.on("close", () => { void shutdownOnPeerLoss("stdin closed (parent gone)"); });
   stderr(`[bridge] stdio MCP bridge ready (tag=${SESSION_TAG ?? "none"}, port=${PORT})`);
 }
 
