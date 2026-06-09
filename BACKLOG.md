@@ -12,10 +12,7 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 🖥️ Clients | 🟠 P1 | [#36](#36-vsc-level-client--per-panel-reply-id--s--p1) (S) | 0% | — | Client = VSC (broadcast to all panels); each panel tags its replies with a Panel ID. Fix located: [ui/server.ts:2106](ui/server.ts#L2106). |
-| 🔔 Notify | 🟡 P2 | [#40](#40-normal-priority-notifs-must-still-reach-vsc_notif--s--p2) (S) | 0% | — | Normal-priority notifs idle-gated when active — ensure they still reach vsc_notif. |
-| 🔔 Notify | 🟡 P2 | [#38](#38-bridge-misreports-delivered-as-n-chunks--s--p2) (S) | 0% | — | Bridge says "Delivered as N chunks" even when server delivered nothing. |
-| 🖥️ Clients | 🟡 P2 | [#39](#39-investigate-duplicate--orphan-sessions-per-window--s--p2) (S) | 0% | — | 3 live bridges for 2 windows — investigate orphan/duplicate sessions. |
+| 🖥️ Clients | 🟡 P2 | [#42](#42-per-panel-invalidate-endpoint--button--s--p2) (S) | — | — | Proposed (from #39): per-session "Invalidate this panel" endpoint + UI button to clear an orphan panel. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -32,37 +29,11 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #36 VSC-level client + per-panel reply id · S · P1 · OPEN
+### #42 Per-panel "Invalidate this panel" endpoint + button · S · P2 · OPEN (proposed)
 
-**Decision (Meni, revised).** Per-panel *addressing* is NOT required. Client = VSC/workspace (tag) is fine — preferred, even. Requirements: (a) addressing a client broadcasts to **all** its panels (already true — tag SSE fan-out); (b) each panel identifies itself with a **Panel ID** when it notifies/replies, so the user knows which panel answered. Not a routing change — an identity-on-reply change.
+**Proposed (from #39 investigation).** #39 confirmed the extra "client" is a real, still-alive resumed Claude panel (`claude.exe --resume …`), not a server bookkeeping ghost — so the server cannot distinguish a legit 2nd window from an orphan panel by tag+host (both are `dell-xps-bullseyenotify` / `127.0.0.1`). The naive "same tag+host + overlapping connectedAt → duplicate" dedup hint is therefore REJECTED — it would false-flag every genuine multi-panel/multi-window user.
 
-**Root cause (located, verified).** The reply/notify prefix is the per-session IDENTITY built in `createMcpServer` at [ui/server.ts:2106](ui/server.ts#L2106): `const identity = sessionTag ? ` + "`@${sessionTag}`" + ` : clientId;` → `identityLine` ([ui/server.ts:2107](ui/server.ts#L2107)) tells the agent to prefix replies with `[${identity}]`. Because every panel of a VSC sends the same `sessionTag`, `identity` is identical (`@dell-xps-bullseyenotify`) for all panels — the per-panel-suffixed `clientId` (`foo`, `foo-2`, `foo-3`) is computed at [ui/server.ts:2523](ui/server.ts#L2523) but discarded here.
-
-**Plan (server-only, no bridge change).** Change [ui/server.ts:2106](ui/server.ts#L2106) to use the already-disambiguated `clientId` as the identity (e.g. `const identity = ` + "`@${clientId}`" + `;`). Panel 2's reply prefix then becomes `[@dell-xps-bullseyenotify-2]` — distinct per panel AND it exactly matches the `id` field `/api/clients` already returns (#35), so a reply maps to the Clients tab with zero extra plumbing. Add a test: two same-tag sessions yield distinct identity lines. Durable human names still via `NOTIFY_MCP_TAG` (#35/B). NOTE: identity activates per new MCP session, so restart/reconnect the bridge to pick it up.
-
----
-
-### #40 Normal-priority notifs must still reach vsc_notif · S · P2 · OPEN
-
-**Confirmed working at high priority (Meni 2026-06-08 19:36).** A `priority:high` notif landed in vsc_notif — webhook→channel wiring is correct. Gap: `normal`-priority notifs are idle-gated to desktop-only while the user is active ([notificationEngine.ts:44](ui/messaging/notificationEngine.ts#L44)) + desktop is disabled → they silently vanish. Requirement: notifs must reliably land in vsc_notif.
-
-**Plan (decide policy).** Options: (a) treat Slack/vsc_notif as exempt from idle gating (always deliver to the channel, gate only phone/SMS/desktop); (b) lower/clear `idle.thresholdSeconds`; (c) agent sends important notifs as `priority:high`. Recommend (a) — the channel is a passive log, not an interrupt, so gating it adds no value. Implement as a per-channel "ignoreIdle" flag in routing.
-
----
-
-### #38 Bridge misreports "Delivered as N chunks" · S · P2 · OPEN
-
-**Problem (verified).** `sendNotifyChunked` ([src/index.ts:278](src/index.ts#L278)) returns `Delivered as N chunks` regardless of the server's real result. When a notif is idle-gated to desktop-only and desktop is disabled, the HTTP server returns `No channels delivered` per chunk, but the bridge still claims delivery — which misled both Meni and the agent during the vsc_notif debug.
-
-**Plan.** Capture each chunk's server result string; if every chunk was suppressed / zero channels delivered, surface that verbatim (e.g. `Suppressed (idle-gated) — 0 channels`); only report "delivered" when ≥1 channel actually sent.
-
----
-
-### #39 Investigate duplicate / orphan sessions per window · S · P2 · OPEN
-
-**Observation (Meni: 2 windows × 1 panel; server shows 3).** Verified via process tree: 3 live `claude.exe` bridges, but TWO share one VSC extension host (parent **61808** → claude 64204 + 33784 → bridges 52276 + 30956); the third is a separate window (parent 66216 → bridge 45032). All 3 heartbeat live → NOT stale ghosts; there genuinely are 3 bridges, so one window holds 2 Claude sessions (a lingering/orphaned conversation or hidden second panel). Server count is correct; the surprise is editor-side.
-
-**Plan.** Determine whether the extension leaves an orphaned `claude.exe` session on panel close/reopen (resume); document how to clear it. Optionally add a server-side dedup hint (same tag+host, overlapping `connectedAt`) to flag likely-duplicate panels in the UI. Investigation first — no fix until cause confirmed.
+**Plan (the worthwhile piece).** Today the only ways to clear an orphan are editor-close or PID-kill; the Clients-tab "Invalidate" (`POST /api/clients/:tag/reconnect`, [ui/server.ts](ui/server.ts)) is tag-scoped — it drops ALL panels and the live one reconnects. Add a per-session disconnect: `POST /api/clients/:tag/panel/:sessionId/reconnect` that closes only `httpTransports[<full id matching the 8-char prefix>]` + its SSE stream; surface a per-panel "Invalidate this panel" button in `refreshClients()` ([ui/public/app.js](ui/public/app.js)) when `panelCount > 1`, showing each panel's `connectedAt` age. Lets Meni kill exactly the orphan from the UI without dropping live panels. Optional advisory-only hint: flag a panel whose `connectedAt` diverges from its siblings beyond `RECONNECT_WINDOW_MS` AND the server has been up longer than that window (never auto-disconnect).
 
 ---
 
@@ -73,6 +44,40 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-09 03:30 — #36 per-panel reply identity
+
+**Fixed (server-only, no bridge change)** in [ui/server.ts](ui/server.ts) `createMcpServer`. The identity ([ui/server.ts:2106](ui/server.ts#L2106)) was `sessionTag ? @${sessionTag} : clientId` → identical (`@dell-xps-bullseyenotify`) for every panel of a window. Now `const identity = @${clientId}` — the already-disambiguated per-session id (derived at [ui/server.ts:2577](ui/server.ts#L2577) as `baseId`→`baseId-2`/`-3`), so panel 2's reply prefix is `[@dell-xps-bullseyenotify-2]`, distinct per panel and exactly matching the `id` `/api/clients` returns (#35). Also switched the two server-side outbound auto-prefixes to clientId for consistency: the `notify` body prefix ([ui/server.ts:2125](ui/server.ts#L2125)) and the `ask` Telegram prefix ([ui/server.ts:2154](ui/server.ts#L2154)). Left the Telegram **reply-routing hint** (`Reply with: @${sessionTag}`) tag-scoped — addressing stays VSC/tag-level per the decision (a reply to `@tag` broadcasts to all panels).
+
+**Verify (verified).** New integration test `same-tag panels get distinct per-panel identity in instructions` ([tests/smoke.test.mjs](tests/smoke.test.mjs), test 13): two same-tag `initialize` calls return instructions containing `YOUR SESSION IDENTITY: "@identitytest"` and `"@identitytest-2"` respectively (asserted distinct). `npm run build` EXIT 0; `node --test` → **15/15 pass**. **Activation:** identity is set per new MCP session — restart/reconnect the bridge to pick it up.
+
+---
+
+### 2026-06-09 03:29 — #40 normal-priority notifs reach vsc_notif (Slack idle-exempt)
+
+**Fixed (policy (a) — Slack is a passive channel-log, exempt from idle gating)** in [ui/messaging/notificationEngine.ts](ui/messaging/notificationEngine.ts). Deleted the `suppressedReason === "idle"` early-return that dropped everything; idle now folds into `desktopOnly` (`const desktopOnly = mode.desktopOnly || mode.suppressedReason === "idle"`), and the Slack send is no longer behind `!desktopOnly` — `if (enableSlack)` fires regardless of idle/desktopOnly. All other channels (telegram/email/ntfy/discord/teams/sms) keep their existing gating; **DND still suppresses everything including Slack** (its early-return is untouched). No config flag added (anti-gating) — Slack-exempt is unconditional.
+
+**Verify (verified).** New integration test `normal-priority notify reaches Slack even while idle-gated` ([tests/smoke.test.mjs](tests/smoke.test.mjs), test 15): forces UI active (`POST /api/ui/visibility {visible:true}` → idle-gated), points `slack.webhookUrl` at a local capture HTTP server, fires a `priority:normal` notify → capture server hit **exactly once** with the message body, and the notify result reads `Sent via: … slack`. `node --test` → **15/15 pass**.
+
+---
+
+### 2026-06-09 03:29 — #38 bridge reports real delivery result
+
+**Fixed** in [src/index.ts](src/index.ts) `sendNotifyChunked`. It returned `Delivered as N chunks` unconditionally. Now it captures each chunk's server result text and uses `"Sent via:"` as the single source of truth for "delivered": all delivered → `Delivered as N chunks (L chars).`; zero delivered → `Suppressed — 0 of N chunks reached any channel. Server said: "<deduped summaries>"`; partial → `Delivered k/N chunks …; N-k reached no channel — server said: …`. Preserves the `isError` short-circuit and appends any `⚠️ USER SENT YOU A MESSAGE` inbox block (stripped from the quoted summaries so suppression reasons stay clean).
+
+**Verify (verified).** New integration test `bridge reports suppression when a multi-chunk notify reaches no channel` ([tests/smoke.test.mjs](tests/smoke.test.mjs), test 14): spawns the real `dist/index.js` bridge, sends a ~1500-char notify with all channels disabled → bridge returns `Suppressed — 0 of N chunks reached any channel` and does NOT claim `Delivered as N chunks`. `npm run build` EXIT 0; `node --test` → **15/15 pass**. **Activation:** bridge re-spawns per MCP client connection — takes effect after the notify MCP server reloads (republish for the `npx` bridge).
+
+---
+
+### 2026-06-09 03:28 — #39 duplicate / orphan sessions — investigation complete
+
+**Investigated (read-only, verified — no code changed; "investigation first" per the story).** Live process tree + `/api/clients` + `/api/sessions` + server.log: the server's 3-client count is CORRECT — each maps to a live heartbeating bridge, no stale ghost. The extra "client" is a **real, still-alive resumed Claude panel** in one window: of two `claude.exe` under ext-host 61808, one carries `--resume 53295aa6-…` (a startup panel-restore, spawned 12s after its sibling). All panels of one project derive the identical tag (`dell-xps-bullseyenotify`) / host (`127.0.0.1`), and the bridge sends NO per-window id, so the server fundamentally cannot tell a legit 2nd window from an orphan panel. The 90s idle reaper ([ui/server.ts:2408](ui/server.ts#L2408)) only clears genuinely-dead sessions; a backgrounded-but-alive resumed panel keeps heartbeating (SSE keepalive + `get_idle_seconds`), so it never reaps.
+
+**Clear it today:** close the duplicate panel in the editor (socket close → session removed immediately), or kill the specific bridge by PID (`taskkill //F //PID <bridge>` — verify cmdline first, never `//IM`). The tag-scoped "Invalidate" button drops ALL panels and the live one reconnects, so it does not durably remove the orphan.
+
+**Recommendation → spun out as proposed #42** (per-session "Invalidate this panel" endpoint + UI button). The literal "same tag+host + overlapping connectedAt → duplicate" dedup hint is **rejected** — it false-flags every genuine multi-panel/multi-window user.
 
 ---
 

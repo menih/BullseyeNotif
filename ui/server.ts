@@ -951,6 +951,21 @@ app.post("/api/clients/:tag/reconnect", (req, res) => {
   res.json({ ok: true, tag, closed });
 });
 
+app.post("/api/clients/:tag/panel/:sessionId/reconnect", (req, res) => {
+  const tag = String(req.params.tag);
+  const prefix = String(req.params.sessionId);
+  let closed = 0;
+  for (const sid of Object.keys(sessions)) {
+    if (sid.slice(0, 8) !== prefix) continue;
+    try { httpTransports[sid]?.close(); } catch { /* transport already gone */ }
+    delete httpTransports[sid];
+    delete sessions[sid];
+    closed++;
+  }
+  log("·", "clients", `invalidate panel ${tag}/${prefix} — ${closed} session(s) dropped`);
+  res.json({ ok: true, tag, sessionId: prefix, closed });
+});
+
 app.get("/api/logs", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");

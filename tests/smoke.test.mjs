@@ -475,3 +475,22 @@ test("normal-priority notify reaches Slack even while idle-gated", async () => {
     capture.close();
   }
 });
+
+// #42 — per-panel invalidate drops only the targeted session; siblings survive.
+test("per-panel invalidate drops only the targeted session, siblings survive", async () => {
+  const tag = "panelinvtest";
+  await initTaggedSession(tag);
+  await initTaggedSession(tag);
+  const panelsOf = async () => (await (await fetch(`http://localhost:${port}/api/clients`)).json()).clients.filter(x => x.tag === tag);
+  let panels = await panelsOf();
+  assert.equal(panels.length, 2, `setup: expected 2 panels, got ${panels.length}`);
+  const victim = panels[0].sessionId;
+  const survivor = panels[1].sessionId;
+  const r = await (await fetch(`http://localhost:${port}/api/clients/${tag}/panel/${victim}/reconnect`, { method: "POST" })).json();
+  assert.equal(r.ok, true);
+  assert.equal(r.closed, 1, `expected exactly 1 session dropped, got ${r.closed}`);
+  panels = await panelsOf();
+  const ids = panels.map(p => p.sessionId);
+  assert.ok(!ids.includes(victim), `victim ${victim} should be gone, got ${JSON.stringify(ids)}`);
+  assert.ok(ids.includes(survivor), `survivor ${survivor} should remain, got ${JSON.stringify(ids)}`);
+});

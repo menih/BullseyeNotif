@@ -806,12 +806,16 @@ async function refreshClients() {
       const label = c.name || ref;
       const aliased = c.name && c.name !== c.tag;
       const kinds = c.kinds.map(k => `<span class="client-kind">${escHtml(k)}</span>`).join("");
+      const connAgo = c.connectedAt ? Math.round((Date.now() - c.connectedAt) / 60000) : null;
       const panelBadge = c.panelCount > 1
-        ? `<span class="client-panel" style="opacity:.6;font-size:.85em">panel ${c.panel}/${c.panelCount}${c.sessionId ? " · " + escHtml(c.sessionId) : ""}</span>`
+        ? `<span class="client-panel" style="opacity:.6;font-size:.85em">panel ${c.panel}/${c.panelCount}${c.sessionId ? " · " + escHtml(c.sessionId) : ""}${connAgo !== null ? " · conn " + connAgo + "m" : ""}</span>`
         : "";
       const where = [aliased ? c.tag : null, c.workspaceName || c.clientName, c.host].filter(Boolean).join(" · ");
       const refArg = ref.replace(/'/g, "\\'");
       const labelArg = label.replace(/'/g, "\\'");
+      const panelBtn = (c.panelCount > 1 && c.sessionId)
+        ? `<button class="btn btn-sm btn-ghost" onclick="invalidatePanel('${refArg}','${c.sessionId}')">Invalidate panel</button>`
+        : "";
       return `<div class="client-row">
         <span class="pill-dot pill-dot-${status}"></span>
         <span class="client-tag" style="color:${clientColor(ref)}" title="${escHtml(ref)}">${escHtml(label)}</span>
@@ -820,6 +824,7 @@ async function refreshClients() {
         <span class="client-actions">
           <button class="btn btn-sm btn-ghost" onclick="renameClient('${refArg}','${labelArg}')">Rename</button>
           <button class="btn btn-sm btn-ghost" onclick="reconnectClient('${refArg}')">Invalidate</button>
+          ${panelBtn}
         </span>
         <span class="client-meta">${where ? escHtml(where) + " · " : ""}seen ${ago}s ago</span>
       </div>`;
@@ -848,6 +853,16 @@ async function reconnectClient(tag) {
     const { closed } = await res.json();
     toast(`Invalidated ${tag} — ${closed} connection(s) dropped`);
   } catch { toast("Invalidate failed", "error"); }
+  setTimeout(refreshClients, 1000);
+}
+
+async function invalidatePanel(tag, sessionId) {
+  if (!confirm(`Invalidate panel ${sessionId} of "${tag}"?\nOnly this one panel's session is dropped — its sibling panels stay connected. A live panel reconnects; an orphan disappears.`)) return;
+  try {
+    const res = await fetch(`/api/clients/${encodeURIComponent(tag)}/panel/${encodeURIComponent(sessionId)}/reconnect`, { method: "POST" });
+    const { closed } = await res.json();
+    toast(`Invalidated panel ${sessionId} — ${closed} session(s) dropped`);
+  } catch { toast("Invalidate panel failed", "error"); }
   setTimeout(refreshClients, 1000);
 }
 
