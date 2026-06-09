@@ -10,10 +10,7 @@
 
 ### 🎯 OUTSTANDING
 
-| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
-|---|---|---|---|---|---|
-| 🖥️ Clients | 🔴 P0 | [#43](#43-alphawave-vsc-panel-not-registering-with-mcp-server--s--p0) (S) | 0% | — | Global hardcoded NOTIFY_MCP_TAG=bullseyenotify mislabels every workspace incl AlphaWave — fix. |
-| 🖥️ Clients | 🟠 P1 | [#44](#44-hide--bot-waiter-from-the-clients-ui--xs--p1) (XS) | 0% | — | -bot auto-responder is meaningless to Meni — hide it from the Clients tab. |
+_(empty — all stories shipped)_
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -30,24 +27,6 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #43 AlphaWave VSC panel not registering with MCP server · S · P0 · OPEN
-
-**Reported (Meni 2026-06-08).** *"why is AlphaWave workspace VSC, which is running right now, does not register with MCP server?!?"* + *"I dont have 3 panels open for claude in VSC but you are detecting 3!"*
-
-**Root cause (verified, not guessed).** The notify MCP is wired GLOBALLY (top-level `mcpServers` in [~/.claude.json:930](file:///c:/Users/menih/.claude.json)) with a HARDCODED `env.NOTIFY_MCP_TAG: "bullseyenotify"`. `deriveVscId()` ([src/index.ts:45](src/index.ts#L45)) returns the explicit `NOTIFY_MCP_TAG` first, so EVERY workspace's bridge — AlphaWave included — tags itself `bullseyenotify` and collapses into the one `dell-xps-bullseyenotify` client. AlphaWave IS connected; it's just mislabeled. The "3 panels I don't have" = panels from different windows (BullseyeNotify + AlphaWave + a lingering `--resume` panel, see #39) all forced under the same tag. Confirmed: all 3 live bridges run `BullseyeNotify/dist/index.js`, `/api/clients` shows only `dell-xps-bullseyenotify`.
-
-**Fix (two parts).** (a) **Code** — `deriveVscId()` should derive from `CLAUDE_PROJECT_DIR` (the per-workspace dir Claude Code sets) before `process.cwd()`, so each window self-tags by its real project. (b) **Config** — remove the hardcoded `env.NOTIFY_MCP_TAG` from the global notify block in `~/.claude.json` so the per-workspace derivation takes effect. After both + a window restart, AlphaWave appears as `dell-xps-alphawave`/`-trade`, distinct from BullseyeNotify.
-
----
-
-### #44 Hide `-bot` waiter from the Clients UI · XS · P1 · OPEN
-
-**Reported (Meni 2026-06-08).** *"-bot client is meaningless to me!! why do we need to expose at all to the user?!?"* The notify-watch auto-responder (`…-bot` long-poll waiter) is shown as a row in the Clients tab (`/api/clients`, [ui/server.ts](ui/server.ts)). #37 already removed it from the addressable `list clients`; this removes it from the UI tab too. It keeps RECEIVING broadcasts (delivery unchanged) — just not displayed.
-
-**Plan.** In `/api/clients`, exclude any tag ending in `-bot` from the returned client list (the waiter `extra` loop + defensively the session/SSE loops). Add an integration test asserting a parked `-bot` waiter is absent from `/api/clients`.
-
----
-
 ### #8 Telegram token replacement · XS · P3 · 🚧 SHELVED (Meni 2026-06-04)
 
 **Shelved** per Meni — not active. Live token `8755252698:…` is revoked (`getMe`→`401`, verified). When resumed: replace `telegram.token` in `~/.notify-mcp/config.json` + `notify-secrets.json` with a fresh BotFather token; `chatId 8596060260` stays.
@@ -55,6 +34,24 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-09 04:05 — #43 AlphaWave (every workspace) mislabeled `bullseyenotify`
+
+**Root cause (verified, not guessed).** Notify MCP is wired GLOBALLY (top-level `mcpServers`, [~/.claude.json](file:///c:/Users/menih/.claude.json)) with a HARDCODED `env.NOTIFY_MCP_TAG: "bullseyenotify"`. `deriveVscId()` returns the explicit tag first ([src/index.ts:45](src/index.ts#L45)), so EVERY window's bridge — AlphaWave included — self-tagged `bullseyenotify` and collapsed into one client. AlphaWave WAS connected, just mislabeled; the "3 panels I don't have" were panels from different windows (BullseyeNotify + AlphaWave + a `--resume` panel per #39) all forced under one tag. Confirmed: all 3 live bridges run `BullseyeNotify/dist/index.js`; `/api/clients` showed only `dell-xps-bullseyenotify`.
+
+**Fixed (two parts).** **(a) Code** ([src/index.ts](src/index.ts)) — `deriveVscId()` now derives from `CLAUDE_PROJECT_DIR` (the per-workspace dir Claude Code sets) before `process.cwd()`, so one globally-wired bridge self-tags per window. **(b) Config** ([~/.claude.json](file:///c:/Users/menih/.claude.json)) — removed the hardcoded `env.NOTIFY_MCP_TAG` from the global notify block (JSON re-validated). Each window now self-tags by its real project.
+
+**Verify (verified).** Test 18 `bridge self-tags from CLAUDE_PROJECT_DIR when NOTIFY_MCP_TAG is unset` ([tests/smoke.test.mjs](tests/smoke.test.mjs)): spawns the bridge with `CLAUDE_PROJECT_DIR=…/awderivetest` + empty `NOTIFY_MCP_TAG` → `/api/clients` shows a client tagged `…-awderivetest`. `npm run build` EXIT 0; `node --test` → **18/18 pass**. Config JSON re-parsed clean. **Operator-verify (activation needs restart):** restart/reload the VSC windows → AlphaWave appears as `dell-xps-alphawave` (or `-trade`), distinct from `dell-xps-bullseyenotify`; the UI server must also restart to serve the rebuilt bridge users connect through.
+
+---
+
+### 2026-06-09 04:04 — #44 hide `-bot` waiter from the Clients UI
+
+**Fixed** ([ui/server.ts](ui/server.ts) `/api/clients`). The notify-watch `…-bot` auto-responder (a long-poll waiter, meaningless to address) was shown as a Clients-tab row. Added `isBot = t => t.endsWith("-bot")` and excluded `-bot` tags from the MCP-session list AND the SSE/waiter `extra` loops. It still RECEIVES broadcasts (delivery unchanged, per #37) — just no longer displayed.
+
+**Verify (verified).** Test 17 `/api/clients hides a -bot waiter, keeps real panels` ([tests/smoke.test.mjs](tests/smoke.test.mjs)): parks a `uibotfilter-bot` waiter beside a real `uibotfilter` session → `/api/clients` returns the real tag and NOT the `-bot`. `node --test` → **18/18 pass**. **Activation:** UI server restart for the `/api/clients` change.
 
 ---
 
