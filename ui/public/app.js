@@ -40,6 +40,7 @@ function handleUrlParams() {
     const s = params.get("success");
     const msg = s === "gmail_connected" ? "Gmail connected successfully!"
       : s === "slack_connected" ? "Slack connected!"
+      : s === "discord_connected" ? "Discord connected!"
       : "Success!";
     toast(msg, "ok");
   }
@@ -47,6 +48,8 @@ function handleUrlParams() {
     const e = decodeURIComponent(params.get("error"));
     const msg = e === "slack_missing_credentials"
       ? "Add your Slack Client ID + Client Secret first, then Connect."
+      : e === "discord_missing_credentials"
+      ? "Add your Discord Client ID + Client Secret (under Advanced) first, then Connect."
       : "Error: " + e;
     toast(msg, "error");
   }
@@ -118,6 +121,9 @@ function populateForm() {
   $("discord-enabled").checked = !!dc.enabled;
   $("discord-webhook").value = dc.webhookUrl ?? "";
   $("discord-username").value = dc.username ?? "";
+  $("discord-clientid").value = dc.clientId ?? "";
+  $("discord-clientsecret").value = dc.clientSecret ?? "";
+  refreshDiscordStatus();
 
   // Slack
   const sl = config.slack ?? {};
@@ -449,7 +455,32 @@ function copyNtfyUrl() {
   navigator.clipboard.writeText(url).then(() => toast("Server URL copied!", "ok")).catch(() => toast("Copy failed", "error"));
 }
 async function saveDiscord() {
-  await patch({ discord: { enabled: $("discord-enabled").checked, webhookUrl: $("discord-webhook").value.trim(), username: $("discord-username").value.trim() || "Claude Notify" } });
+  await patch({ discord: {
+    enabled: $("discord-enabled").checked,
+    webhookUrl: $("discord-webhook").value.trim(),
+    username: $("discord-username").value.trim() || "Claude Notify",
+    clientId: $("discord-clientid").value.trim(),
+    clientSecret: $("discord-clientsecret").value.trim(),
+  } });
+}
+
+async function disconnectDiscord() {
+  if (!confirm("Disconnect Discord? You can reconnect with one click.")) return;
+  try { await fetch("/auth/discord", { method: "DELETE" }); toast("Discord disconnected", "ok"); await loadConfig(); }
+  catch (e) { toast("Error: " + e, "error"); }
+}
+
+async function refreshDiscordStatus() {
+  const el = $("discord-status");
+  if (!el) return;
+  try {
+    const s = await (await fetch("/api/discord/status")).json();
+    if (s.redirectUri && $("discord-redirect")) $("discord-redirect").textContent = s.redirectUri;
+    if ($("discord-connect-btn")) $("discord-connect-btn").textContent = s.configured ? "🔗 Reconnect Discord" : "🔗 Connect Discord (browser sign-in)";
+    if ($("discord-disconnect-btn")) $("discord-disconnect-btn").classList.toggle("hidden", !s.configured);
+    if (s.configured) { el.textContent = s.channelName ? `✓ Connected — posting to ${s.channelName}.` : "✓ Discord webhook configured."; el.classList.remove("hidden"); }
+    else el.classList.add("hidden");
+  } catch { el.classList.add("hidden"); }
 }
 async function saveSlack() {
   await patch({
