@@ -32,7 +32,15 @@ _(empty — all stories shipped)_
 
 ---
 
-### 2026-06-24 02:23 — #52 Discord one-click OAuth (browser → channel webhook)
+### 2026-06-24 06:15 — #54 distinct client per VS Code window (leverage MCP + extension)
+
+**Ask (Meni 2026-06-23).** Two VS Code windows on DIFFERENT workspaces collapsed into one client ("2 panels"). Meni's insight: leverage BOTH the MCP bridge and the extension for workspace info.
+
+**Root cause (verified live).** `CLAUDE_PROJECT_DIR` is UNSET in the VS Code extension's MCP context and the bridge cwd is shared (`VSCODE_CWD=…\Microsoft VS Code`), so `deriveVscId` gave every window the same tag. Only reliable per-window signal at the bridge = `CLAUDE_CODE_SESSION_ID`; only reliable readable workspace name = the extension's `vscode.workspace`.
+
+**Done (both leveraged).** (a) **Bridge** ([src/index.ts](src/index.ts)): appends a 6-char `CLAUDE_CODE_SESSION_ID` hash to the tag when no project dir is set → distinct tag per window (subagents share the session id → still fold). (b) **Extension** ([vscode-extension/extension.js](vscode-extension/extension.js) `registerWindow`): POSTs `{sessionId, workspaceName, workspacePath}` to new **`POST /api/window/register`**. (c) **Server** ([ui/server.ts](ui/server.ts)): `windowRegistry[sessionId]`; `/api/clients` display name = rename-alias → registered workspaceName → tag. Delivery: re-wired [~/.claude.json](file:///c:/Users/menih/.claude.json) notify → local `node dist/index.js` (fix applies without republish); extension rebuilt+reinstalled `omni-notify-mcp-menihillel@1.4.1`.
+
+**Verify (verified live).** Two local bridges with distinct `CLAUDE_CODE_SESSION_ID` + two `/api/window/register` calls → `/api/clients` showed **two distinct, readably-named clients**: `AlphaWave` (tag `…-bbbb22`) and `BullseyeNotify` (tag `…-aaaa11`). `node --test` → 22/22. Local bridge boot logs `tag=dell-xps-bullseyenotify-29cdad` (session-hash applied). **Operator-verify:** reload BOTH VS Code windows (Ctrl+Shift+P → Reload Window) so each re-spawns from the re-wired local bridge + re-registers its workspace → they appear as two distinct clients named by workspace.
 
 **Ask (Meni 2026-06-23).** "Finish stories" — browser-OAuth for the remaining providers.
 

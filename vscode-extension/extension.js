@@ -45,12 +45,41 @@ function activate(context) {
     vscode.commands.registerCommand("omniNotifyMcp.configureClaude", () => configureClaudeMcp({ showResult: true }))
   );
 
+  // Leverage both MCP + extension: the extension knows this window's real
+  // workspace (the MCP bridge can't), so register sessionId → workspaceName so
+  // the server can show two windows on different workspaces as distinct,
+  // readably-named clients.
+  ensureServer().then(registerWindow).catch(() => {});
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => registerWindow()));
+
   // First-run: wire Claude MCP automatically (idempotent, silent).
   const KEY = "omniNotifyMcp.welcomed";
   if (!context.globalState.get(KEY)) {
     context.globalState.update(KEY, true);
     configureClaudeMcp({ showResult: false });
   }
+}
+
+// Tell the server this window's workspace, keyed by CLAUDE_CODE_SESSION_ID (the
+// same id the MCP bridge reports as hsid), so the server can join them.
+function registerWindow() {
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
+  if (!sessionId) return; // no shared key with the bridge → nothing to correlate
+  const ws = vscode.workspace;
+  const folder = ws.workspaceFolders && ws.workspaceFolders[0];
+  const payload = JSON.stringify({
+    sessionId,
+    workspaceName: ws.name || (folder && folder.name) || "",
+    workspacePath: (folder && folder.uri && folder.uri.fsPath) || "",
+  });
+  const req = http.request(
+    { host: "127.0.0.1", port: uiPort(), path: "/api/window/register", method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } },
+    (res) => res.resume()
+  );
+  req.on("error", () => {});
+  req.write(payload);
+  req.end();
 }
 
 function deactivate() {

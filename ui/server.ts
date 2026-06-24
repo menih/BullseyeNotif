@@ -385,6 +385,24 @@ app.post("/api/config", (req, res) => {
   }
 });
 
+// ── Per-window workspace registry ───────────────────────────────────────────
+// The VS Code extension knows its window's real workspace (the MCP bridge
+// can't), so it registers {sessionId → workspaceName} here. /api/clients then
+// shows the readable workspace name for the bridge session sharing that
+// CLAUDE_CODE_SESSION_ID — giving two windows on different workspaces two
+// distinct, readably-named clients.
+const windowRegistry: Record<string, { workspaceName?: string; workspacePath?: string; at: number }> = {};
+
+app.post("/api/window/register", (req, res) => {
+  const sessionId = String(req.body?.sessionId ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+  const workspaceName = typeof req.body?.workspaceName === "string" ? req.body.workspaceName.slice(0, 80) : "";
+  const workspacePath = typeof req.body?.workspacePath === "string" ? req.body.workspacePath.slice(0, 300) : "";
+  if (!sessionId) { res.status(400).json({ error: "sessionId required" }); return; }
+  windowRegistry[sessionId] = { workspaceName, workspacePath, at: Date.now() };
+  log("·", "window", `registered ${sessionId.slice(0, 8)} → ${workspaceName || "(no workspace)"}`);
+  res.json({ ok: true });
+});
+
 // ── Test routes ───────────────────────────────────────────────────────────────
 
 // Sound-only test — fires a system sound regardless of the saved 'sound'
@@ -1179,18 +1197,22 @@ app.get("/api/clients", (_req, res) => {
     ordinals.set(key, panel);
     const kinds = ["mcp"];
     if (s.tag && sseSubscribersForTag(s.tag) > 0) kinds.push("sse");
+    // Display name priority: explicit rename alias → the workspace name the
+    // extension registered for this window's session → the derived tag.
+    const regWs = s.hostSessionId ? windowRegistry[s.hostSessionId]?.workspaceName : "";
+    const name = clientAliasMap()[s.tag ?? ""] || regWs || displayTag(s.tag ?? s.clientId);
     return {
       id: s.clientId,
       sessionId: s.sid.slice(0, 8),
       tag: s.tag,
-      name: displayTag(s.tag ?? s.clientId),
+      name,
       panel,
       panelCount: panelTotals.get(key) ?? 1,
       kinds,
       lastSeen: s.lastSeen,
       connectedAt: s.connectedAt,
       host: s.host,
-      workspaceName: s.workspaceName,
+      workspaceName: regWs || s.workspaceName,
       clientName: s.clientName,
     };
   });

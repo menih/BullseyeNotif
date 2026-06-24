@@ -64,7 +64,18 @@ function deriveVscId(): string {
 }
 
 const VSC_ID = deriveVscId();
-const SESSION_TAG = `${hostname().toLowerCase().replace(/[^a-z0-9_-]/g, "")}-${VSC_ID}`;
+// In the VS Code extension Claude Code does NOT set CLAUDE_PROJECT_DIR for MCP
+// servers, and the bridge's cwd is shared across windows (VSCODE_CWD), so the
+// project name alone collapses every window to one tag. When no explicit tag /
+// project dir was provided, append a short stable hash of CLAUDE_CODE_SESSION_ID
+// (shared by a session + its subagents → they still fold) so each window is a
+// distinct client. The extension supplies the readable workspace name separately.
+const SESSION_SUFFIX = (() => {
+  if (process.env.NOTIFY_MCP_TAG || process.env.CLAUDE_PROJECT_DIR) return "";
+  const sid = (process.env.CLAUDE_CODE_SESSION_ID || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  return sid ? `-${sid.slice(0, 6)}` : "";
+})();
+const SESSION_TAG = `${hostname().toLowerCase().replace(/[^a-z0-9_-]/g, "")}-${VSC_ID}${SESSION_SUFFIX}`;
 const CLIENT_NAME = "claude-channel-bridge";
 
 // CLAUDE_CODE_SESSION_ID is shared by an interactive Claude session AND every
