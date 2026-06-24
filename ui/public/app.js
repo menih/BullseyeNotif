@@ -498,10 +498,10 @@ async function refreshSlackTokenStatus() {
   try {
     const s = await (await fetch("/api/slack/status")).json();
     if (s.redirectUri && $("slack-redirect")) $("slack-redirect").textContent = s.redirectUri;
-    // A working token already exists → hide the entire Connect/OAuth setup so the
-    // user is never prompted to log in (covers Google-SSO Slack users with no
-    // password). The connect form only shows when nothing is configured yet.
-    if ($("slack-oauth")) $("slack-oauth").classList.toggle("hidden", !!s.botTokenConfigured);
+    // OAuth Connect is the primary, always-visible option (#53): relabel to
+    // Reconnect when a token already exists; show Disconnect when OAuth-connected.
+    if ($("slack-connect-btn")) $("slack-connect-btn").textContent = s.botTokenConfigured ? "🔗 Reconnect Slack" : "🔗 Connect Slack (browser sign-in)";
+    if ($("slack-disconnect-btn")) $("slack-disconnect-btn").classList.toggle("hidden", !s.team);
     if (!s.botTokenConfigured) { el.classList.add("hidden"); return; }
     el.innerHTML = "";
     const span = document.createElement("span");
@@ -511,8 +511,7 @@ async function refreshSlackTokenStatus() {
         ? "✓ Slack is already configured — pick channels below."
         : "✓ Slack bot token saved.";
     el.appendChild(span);
-    // Offer the already-configured bus channel as a one-click add (readable
-    // button, not an inline link).
+    // Offer the already-configured bus channel as a one-click add.
     if (s.busChannel && !slackChannels.some(c => c.id === s.busChannel)) {
       const btn = document.createElement("button");
       btn.className = "btn btn-sm btn-primary";
@@ -520,16 +519,6 @@ async function refreshSlackTokenStatus() {
       btn.textContent = `+ Add ${s.busChannel}`;
       btn.onclick = () => addSlackChannel(s.busChannel, s.busChannel);
       el.appendChild(btn);
-    }
-    // Keep Disconnect reachable for OAuth-connected workspaces even though the
-    // setup form is hidden.
-    if (s.team) {
-      const dc = document.createElement("button");
-      dc.className = "btn btn-sm btn-danger";
-      dc.style.marginLeft = "8px";
-      dc.textContent = "Disconnect";
-      dc.onclick = disconnectSlack;
-      el.appendChild(dc);
     }
     el.classList.remove("hidden");
   } catch { el.classList.add("hidden"); }

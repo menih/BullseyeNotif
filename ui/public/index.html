@@ -284,15 +284,26 @@
             <span class="toggle-lbl">Enable</span>
             <button class="btn btn-sm btn-ghost" onclick="testChannel('discord')">Test</button>
           </div>
-          <details class="guide">
-            <summary>Create a Discord webhook (1 min)</summary>
+          <div id="discord-status" class="ok-banner hidden" style="margin-bottom:4px"></div>
+          <!-- PRIMARY: one-click browser sign-in — pick a server+channel, webhook captured -->
+          <div class="fg" id="discord-oauth">
+            <a class="btn btn-primary" id="discord-connect-btn" href="/auth/discord/start">🔗 Connect Discord (browser sign-in)</a>
+            <button class="btn btn-sm btn-danger hidden" id="discord-disconnect-btn" onclick="disconnectDiscord()">Disconnect</button>
+            <span class="hint">One click — authorize, pick a server + channel, the webhook is captured automatically. First time only: add your Discord app's Client ID/Secret under <b>Advanced</b>.</span>
+          </div>
+          <details class="guide" id="discord-advanced">
+            <summary>Advanced / manual setup</summary>
             <ol>
-              <li>Open your Discord server → pick a channel → Edit Channel</li>
-              <li>Integrations → Webhooks → New Webhook → Copy URL</li>
+              <li><b>To enable Connect:</b> <a href="https://discord.com/developers/applications" target="_blank">discord.com/developers</a> → New Application → <b>OAuth2</b> → copy <b>Client ID</b> + <b>Client Secret</b> below; add redirect <code class="cp" onclick="copyText(this)" id="discord-redirect">http://localhost:3737/auth/discord/callback</code>.</li>
+              <li><b>Or manual webhook:</b> Discord channel → Edit Channel → Integrations → Webhooks → New Webhook → Copy URL → paste below.</li>
             </ol>
+            <div class="row2" style="padding:0 11px">
+              <div class="fg"><label>Client ID</label><input type="text" id="discord-clientid" placeholder="from OAuth2" oninput="saveDiscordDebounced()"></div>
+              <div class="fg"><label>Client Secret</label><input type="password" id="discord-clientsecret" placeholder="from OAuth2" oninput="saveDiscordDebounced()"></div>
+            </div>
+            <div class="fg" style="padding:8px 11px 0"><label>Webhook URL (manual, instead of Connect)</label><input type="password" id="discord-webhook" placeholder="https://discord.com/api/webhooks/…" oninput="saveDiscordDebounced()"></div>
+            <div class="fg" style="padding:8px 11px 10px"><label>Bot name (optional)</label><input type="text" id="discord-username" placeholder="Claude Notify" oninput="saveDiscordDebounced()"></div>
           </details>
-          <div class="fg"><label>Webhook URL</label><input type="password" id="discord-webhook" placeholder="https://discord.com/api/webhooks/…" oninput="saveDiscordDebounced()"></div>
-          <div class="fg"><label>Bot name (optional)</label><input type="text" id="discord-username" placeholder="Claude Notify" oninput="saveDiscordDebounced()"></div>
         </div>
       </div>
 
@@ -318,24 +329,11 @@
             <button class="btn btn-sm btn-ghost" onclick="testChannel('slack')">Test</button>
           </div>
           <div id="slack-token-status" class="ok-banner hidden" style="margin-bottom:4px"></div>
+          <!-- PRIMARY: one-click browser sign-in (the recommended, frictionless path) -->
           <div class="fg" id="slack-oauth">
-            <label>Connect with Slack</label>
-            <details class="guide" id="slack-oauth-guide">
-              <summary>One-click connect (recommended)</summary>
-              <ol>
-                <li>At <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a> → your app → <b>Basic Information</b>: copy <b>Client ID</b> + <b>Client Secret</b> into the fields below.</li>
-                <li><b>OAuth &amp; Permissions → Redirect URLs</b> → Add → paste <code class="cp" onclick="copyText(this)" id="slack-redirect">http://localhost:3737/auth/slack/callback</code> → Save URLs.</li>
-                <li>Click <b>Connect Slack</b> → Authorize in the browser. Token + all scopes are captured automatically — no copying tokens.</li>
-              </ol>
-            </details>
-            <div class="row2">
-              <div class="fg"><label>Client ID</label><input type="text" id="slack-clientid" placeholder="from Basic Information" oninput="saveSlackDebounced()"></div>
-              <div class="fg"><label>Client Secret</label><input type="password" id="slack-clientsecret" placeholder="from Basic Information" oninput="saveSlackDebounced()"></div>
-            </div>
-            <div class="actions">
-              <a class="btn btn-sm btn-primary" id="slack-connect-btn" href="/auth/slack/start">Connect Slack →</a>
-              <button class="btn btn-sm btn-danger hidden" id="slack-disconnect-btn" onclick="disconnectSlack()">Disconnect</button>
-            </div>
+            <a class="btn btn-primary" id="slack-connect-btn" href="/auth/slack/start">🔗 Connect Slack (browser sign-in)</a>
+            <button class="btn btn-sm btn-danger hidden" id="slack-disconnect-btn" onclick="disconnectSlack()">Disconnect</button>
+            <span class="hint">One click — authorize in your browser, no tokens to copy. First time only: add your Slack app's Client ID/Secret under <b>Advanced</b>.</span>
           </div>
           <div class="fg">
             <label>Channels to notify</label>
@@ -347,25 +345,24 @@
             </div>
             <div id="slack-channel-picker" class="picker hidden"></div>
           </div>
-          <details class="guide">
-            <summary>Use a different bot token (optional)</summary>
+          <details class="guide" id="slack-advanced">
+            <summary>Advanced / manual setup</summary>
             <ol>
-              <li>Only needed if you don't already have a Slack bus token configured.</li>
-              <li><a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a> → your app → <b>OAuth &amp; Permissions</b> (left sidebar)</li>
-              <li>Bot Token Scopes: add <code class="cp" onclick="copyText(this)">chat:write</code> <code class="cp" onclick="copyText(this)">channels:read</code> <code class="cp" onclick="copyText(this)">groups:read</code> → Install to Workspace</li>
-              <li>Copy the <b>Bot User OAuth Token</b> (starts <code class="cp" onclick="copyText(this)">xoxb-</code>) from the top of that page → paste below</li>
+              <li><b>To enable Connect:</b> <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a> → your app → <b>Basic Information</b> → copy <b>Client ID</b> + <b>Client Secret</b> below.</li>
+              <li><b>OAuth &amp; Permissions → Redirect URLs</b> → Add → paste <code class="cp" onclick="copyText(this)" id="slack-redirect">http://localhost:3737/auth/slack/callback</code> → Save.</li>
             </ol>
-            <div class="fg" style="padding:0 11px 10px">
-              <label>Bot token</label>
-              <input type="password" id="slack-bottoken" placeholder="leave blank to reuse configured token" oninput="saveSlackDebounced()">
+            <div class="row2" style="padding:0 11px">
+              <div class="fg"><label>Client ID</label><input type="text" id="slack-clientid" placeholder="from Basic Information" oninput="saveSlackDebounced()"></div>
+              <div class="fg"><label>Client Secret</label><input type="password" id="slack-clientsecret" placeholder="from Basic Information" oninput="saveSlackDebounced()"></div>
             </div>
-          </details>
-          <details class="guide">
-            <summary>Or one channel via webhook (no bot token)</summary>
-            <ol>
-              <li>Incoming Webhooks → On → Add New Webhook to Workspace → pick channel → Copy URL</li>
-            </ol>
-            <div class="fg" style="padding:0 11px 10px"><label>Webhook URL</label><input type="password" id="slack-webhook" placeholder="https://hooks.slack.com/services/…" oninput="saveSlackDebounced()"></div>
+            <div class="fg" style="padding:8px 11px 0">
+              <label>Bot token (manual, instead of Connect)</label>
+              <input type="password" id="slack-bottoken" placeholder="xoxb-… (blank = reuse configured token)" oninput="saveSlackDebounced()">
+            </div>
+            <div class="fg" style="padding:8px 11px 10px">
+              <label>Webhook URL (single channel, no bot token)</label>
+              <input type="password" id="slack-webhook" placeholder="https://hooks.slack.com/services/…" oninput="saveSlackDebounced()">
+            </div>
           </details>
         </div>
       </div>

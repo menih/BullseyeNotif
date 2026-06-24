@@ -12,31 +12,17 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 🪪 Slack UX | 🟠 P1 | [#53](#53-slack-card-oauth-first-hide-the-rest--s--p1) (S) | 10% | | Make browser-OAuth the first/primary option; bury manual token/webhook/guides. |
 | 🔐 Browser-OAuth onboarding | 🟠 P1 | [#52](#52-browser-oauth-onboarding-for-remaining-providers--m--p1) (M) | proposed | | Discord/Teams OAuth doable; Telegram/AWS can't — awaiting Meni's pick. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
 
 ### ⏳ WAITING
-
-| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
-|---|---|---|---|---|---|
-| 📲 Telegram | 🟢 P3 | [#8](#8-telegram-token-replacement--xs--p3) (XS) | — | 🚧 shelved | Revoked bot token — shelved per Meni 2026-06-04. |
+_(empty — only Meni places rows here)_
 
 ---
 
 ## 📋 OPEN BACKLOG
-
----
-
-### #53 Slack card: OAuth-first, hide the rest · S · P1
-
-**Ask (Meni 2026-06-23).** "If browser auth is possible, offer it as the FIRST option and hide everything else (guidance/instructions/description/crap). Simplest, frictionless." Applies anywhere browser-OAuth exists; Slack is the active case.
-
-**Plan.** Restructure the Slack card ([ui/public/index.html](ui/public/index.html) + [app.js](ui/public/app.js)): make **Connect Slack** (browser OAuth) the FIRST, primary, always-visible CTA; collapse the Client ID/Secret + redirect instructions, the manual bot-token field, the webhook fallback, and all guide `ol`s into ONE collapsed "Advanced / manual" `<details>`. When already connected/configured, show a compact "✓ Connected" + small Reconnect/Disconnect; otherwise Connect is the hero. (Started: reading the card markup; not yet edited.)
-
-**Note.** Email already has Google OAuth but its app-password path is lower-friction (full Gmail OAuth needs a user Google Cloud app) — leave unless Meni wants it flipped. Discord/Teams covered by #52.
 
 ---
 
@@ -56,13 +42,15 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #8 Telegram token replacement · XS · P3 · 🚧 SHELVED (Meni 2026-06-04)
-
-**Shelved** per Meni — not active. Live token `8755252698:…` is revoked (`getMe`→`401`, verified). When resumed: replace `telegram.token` in `~/.notify-mcp/config.json` + `notify-secrets.json` with a fresh BotFather token; `chatId 8596060260` stays.
+## 📦 DONE — newest first
 
 ---
 
-## 📦 DONE — newest first
+### 2026-06-24 02:11 — #53 Slack card: browser-OAuth first, everything else in one Advanced fold
+
+**Ask (Meni 2026-06-23).** "If browser auth is possible, offer it as the FIRST option and hide everything else (guidance/instructions/crap). Simplest, frictionless."
+
+**Done** ([ui/public/index.html](ui/public/index.html) Slack card + [app.js](ui/public/app.js) `refreshSlackTokenStatus`). **Connect Slack (browser sign-in)** is now the first, primary, always-visible CTA (relabels to "Reconnect Slack" once a token exists; Disconnect shows when OAuth-connected). Everything else — Client ID/Secret + redirect-URL instructions, the manual `xoxb-` bot-token field, and the webhook fallback — collapsed into ONE `<details id="slack-advanced">` "Advanced / manual setup". The long per-path guides are gone; a one-line hint points first-timers to Advanced. Channels-to-notify stays between Connect and Advanced. **Verify:** `node --check ui/public/app.js` OK; static change (no relaunch) — hard-refresh the panel. **Note:** email keeps its app-password path (lower friction than a user-created Google OAuth app); Discord/Teams OAuth tracked in #52.
 
 ---
 

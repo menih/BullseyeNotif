@@ -23,6 +23,9 @@ const SLACK_REDIRECT_URI = `http://localhost:${PORT}/auth/slack/callback`;
 // Bot scopes requested during the one-click OAuth connect. chat:write.public
 // lets the bot post to public channels without being invited first.
 const SLACK_OAUTH_SCOPES = "channels:read,groups:read,chat:write,chat:write.public";
+const DISCORD_REDIRECT_URI = `http://localhost:${PORT}/auth/discord/callback`;
+// webhook.incoming makes Discord return a ready-to-use channel webhook on Authorize.
+const DISCORD_OAUTH_SCOPE = "webhook.incoming";
 
 const PUBLIC_DIR = join(fileURLToPath(new URL("../../ui/public", import.meta.url)));
 
@@ -41,7 +44,7 @@ function defaultConfig() {
     sms: { enabled: false, accessKeyId: "", secretAccessKey: "", region: "us-east-1", originationNumber: "", to: [] },
     email: { enabled: false, to: "" },
     ntfy: { enabled: false, topic: "", serverUrl: "" },
-    discord: { enabled: false, webhookUrl: "", username: "Claude Notify" },
+    discord: { enabled: false, webhookUrl: "", username: "Claude Notify", clientId: "", clientSecret: "", channelName: "" },
     slack: { enabled: false, webhookUrl: "", botToken: "", channels: [], clientId: "", clientSecret: "", team: "" },
     teams: { enabled: false, webhookUrl: "" },
     dnd: {
@@ -155,6 +158,7 @@ function maskSecrets(config: Record<string, any>): Record<string, any> {
   if (c.telegram?.token) c.telegram.token = MASKED;
   if (c.whatsapp?.apiToken) c.whatsapp.apiToken = MASKED;
   if (c.discord?.webhookUrl) c.discord.webhookUrl = MASKED;
+  if (c.discord?.clientSecret) c.discord.clientSecret = MASKED;
   if (c.slack?.webhookUrl) c.slack.webhookUrl = MASKED;
   if (c.slack?.botToken) c.slack.botToken = MASKED;
   if (c.slack?.clientSecret) c.slack.clientSecret = MASKED;
@@ -188,6 +192,7 @@ function mergePreservingSecrets(
   guard(["telegram", "token"]);
   guard(["whatsapp", "apiToken"]);
   guard(["discord", "webhookUrl"]);
+  guard(["discord", "clientSecret"]);
   guard(["slack", "webhookUrl"]);
   guard(["slack", "botToken"]);
   guard(["slack", "clientSecret"]);
@@ -815,6 +820,62 @@ app.get("/auth/slack/callback", async (req, res) => {
 app.delete("/auth/slack", (_req, res) => {
   const cfg = loadConfig();
   if (cfg.slack) { delete cfg.slack.botToken; delete cfg.slack.team; }
+  saveConfig(cfg);
+  res.json({ ok: true });
+});
+
+// ── Discord one-click OAuth (browser "Authorize" → channel webhook) ───────────
+// Discord's webhook.incoming scope returns a ready-to-use channel webhook on
+// authorize — the user picks a server+channel in the browser, no URL to copy.
+app.get("/api/discord/status", (_req, res) => {
+  const dc = loadConfig().discord ?? {};
+  res.json({
+    configured: !!dc.webhookUrl,
+    hasOAuthApp: !!(dc.clientId && dc.clientSecret),
+    channelName: dc.channelName || null,
+    redirectUri: DISCORD_REDIRECT_URI,
+  });
+});
+
+app.get("/auth/discord/start", (_req, res) => {
+  const { clientId } = loadConfig().discord ?? {};
+  if (!clientId) { res.redirect("/?error=discord_missing_credentials"); return; }
+  const url = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(clientId)}`
+    + `&scope=${encodeURIComponent(DISCORD_OAUTH_SCOPE)}`
+    + `&response_type=code`
+    + `&redirect_uri=${encodeURIComponent(DISCORD_REDIRECT_URI)}`;
+  res.redirect(url);
+});
+
+app.get("/auth/discord/callback", async (req, res) => {
+  const { code, error } = req.query as Record<string, string>;
+  if (error) { res.redirect(`/?error=${encodeURIComponent(error)}`); return; }
+  const cfg = loadConfig();
+  const { clientId, clientSecret } = cfg.discord ?? {};
+  if (!clientId || !clientSecret || !code) { res.redirect("/?error=discord_missing_credentials"); return; }
+  try {
+    const body = new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: "authorization_code", code, redirect_uri: DISCORD_REDIRECT_URI });
+    const r = await fetch("https://discord.com/api/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+    const json = await r.json() as any;
+    if (!r.ok || !json.webhook?.url) throw new Error(json.error_description ?? json.error ?? "discord token exchange failed");
+    cfg.discord = cfg.discord ?? {};
+    cfg.discord.webhookUrl = json.webhook.url;     // ready-to-post channel webhook
+    cfg.discord.channelName = json.webhook.name || json.webhook.channel_id || "";
+    cfg.discord.enabled = true;
+    saveConfig(cfg);
+    res.redirect("/?success=discord_connected");
+  } catch (err) {
+    res.redirect(`/?error=${encodeURIComponent(String(err))}`);
+  }
+});
+
+app.delete("/auth/discord", (_req, res) => {
+  const cfg = loadConfig();
+  if (cfg.discord) { delete cfg.discord.webhookUrl; delete cfg.discord.channelName; }
   saveConfig(cfg);
   res.json({ ok: true });
 });
