@@ -10,9 +10,7 @@
 
 ### 🎯 OUTSTANDING
 
-| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
-|---|---|---|---|---|---|
-| 🔐 Browser-OAuth onboarding | 🟠 P1 | [#52](#52-browser-oauth-onboarding-for-remaining-providers--m--p1) (M) | proposed | | Discord/Teams OAuth doable; Telegram/AWS can't — awaiting Meni's pick. |
+_(empty — all stories shipped)_
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -26,23 +24,23 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #52 Browser-OAuth onboarding for remaining providers · M · P1 · (proposed)
-
-**Ask (Meni 2026-06-23).** "Ultimately I want the user to use the browser for auth and piggyback on that auth — best ease of use! Same for telegram/AWS/teams/discord/emails etc."
-
-**Verified feasibility (per provider — NOT all are possible):**
-- **Email (Gmail)** — ✅ DONE. Browser "Sign in with Google" OAuth (`/auth/google/*`).
-- **Slack** — ✅ DONE (#49). Browser OAuth v2; Slack's page offers "Continue with Google" (no password).
-- **Discord** — ✅ DOABLE. Discord OAuth2 with the `webhook.incoming` scope returns a channel webhook URL on Authorize ("Add to Discord" → pick channel → done). Needs a one-time Discord app (client id/secret), like Slack.
-- **Teams** — ✅ DOABLE but heavier. Microsoft identity (Azure AD) OAuth → Graph `chat/channel` post; needs an Azure app registration + permissions. (Webhook is the no-OAuth alternative.)
-- **Telegram** — ❌ NOT possible. A *send* token only comes from BotFather (manual); there is no OAuth that yields a bot token. The browser "Login Widget" returns only a user id, not a send credential. Best achievable ease already shipped: token guide + **Detect chats** auto-discovery (#47).
-- **AWS (SMS)** — ❌ NOT possible as simple OAuth. AWS auth is IAM access keys (Meni's are `AKIA…`, auto-imported #51) or IAM Identity Center SSO device-flow (only if the org uses Identity Center; his account uses IAM keys). No "click Authorize → API key."
-
-**Decision needed (Meni):** Discord + Teams are OFF in the current config. Build their OAuth now, or defer until used? (Telegram/AWS are at their ease ceiling already.)
+_(empty — all stories shipped)_
 
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-24 02:23 — #52 Discord one-click OAuth (browser → channel webhook)
+
+**Ask (Meni 2026-06-23).** "Finish stories" — browser-OAuth for the remaining providers.
+
+**Done — Discord OAuth2** ([ui/server.ts](ui/server.ts) `/auth/discord/start` + `/auth/discord/callback` + `/api/discord/status` + DELETE; config `discord.clientId/clientSecret/channelName` + mask/guard). Discord's `webhook.incoming` scope returns a ready-to-post channel webhook on Authorize — the user clicks Connect, picks a server+channel in the browser, and the webhook URL is captured automatically (saved to `discord.webhookUrl`, which the existing sender already uses). Discord card restructured Connect-first ([ui/public/index.html](ui/public/index.html) + [app.js](ui/public/app.js) `refreshDiscordStatus`/`disconnectDiscord`), manual webhook + Client ID/Secret in one Advanced fold (mirrors Slack #53).
+
+**Verify (verified live).** `npm run build` EXIT 0; `node --test` → **22/22**; `/api/discord/status` → `{configured:false,…,redirectUri:…}`; `/auth/discord/start` (no creds) → `302 /?error=discord_missing_credentials` (wired correctly). **Disclosed:** a real connect needs Meni to create a Discord app (Client ID/Secret) + click Authorize — same one-time step as Slack.
+
+**Feasibility summary (final):** Gmail ✅, Slack ✅, Discord ✅ (browser OAuth). **Teams** stays on its **webhook** — Microsoft killed simple Incoming Webhooks toward Power Automate "Workflows" (still a paste-a-URL flow, no OAuth); a true browser-OAuth post needs an Azure app + Graph channel permissions, which is *more* friction, not less. **Telegram** (BotFather bot token) and **AWS SMS** (IAM keys) have no OAuth-to-credential path — Meni accepted these ceilings; best ease already shipped (Detect-chats / auto-import).
 
 ---
 
