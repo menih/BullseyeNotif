@@ -193,6 +193,21 @@ main {
   flex-shrink: 0;
 }
 
+/* Collapsible activity-log section (collapsed by default). */
+.log-collapse {
+  background: transparent; border: none; cursor: pointer; padding: 2px;
+  color: var(--text-3); display: inline-flex; align-items: center; flex-shrink: 0;
+}
+.log-collapse:hover { color: var(--text); }
+.log-chevron { width: 16px; height: 16px; transition: transform .2s; }
+.log-section.collapsed .log-chevron { transform: rotate(-90deg); }
+.log-section.collapsed { flex: 0 0 auto; }
+.log-section.collapsed .log-header { border-bottom: none; }
+.log-section.collapsed .log-panel,
+.log-section.collapsed .clients-panel { display: none !important; }
+/* When the log is collapsed, let the config panel take the freed space. */
+main:has(.log-section.collapsed) .config-panel { height: auto; flex: 1 1 auto; }
+
 .log-title {
   display: flex;
   align-items: center;

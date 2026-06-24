@@ -32,6 +32,14 @@ _(empty — all stories shipped)_
 
 ---
 
+### 2026-06-24 08:15 — collapsible activity-log section (collapsed by default) + Slack OAuth creds pre-filled
+
+**Log collapse (Meni 2026-06-23).** Activity-log section is now collapse/expand, **collapsed by default**. Added a chevron toggle in the log header ([ui/public/index.html](ui/public/index.html) `.log-collapse`), `toggleLog()` ([ui/public/app.js](ui/public/app.js)), and CSS ([ui/public/style.css](ui/public/style.css)): `.log-section.collapsed` hides the log/clients panels + rotates the chevron; `main:has(.log-section.collapsed) .config-panel` grows to reclaim the space. Static change — hard-refresh. **Verify:** `node --check app.js` OK.
+
+**Slack OAuth unblock (Meni 2026-06-23).** "Cannot reconnect" was the OAuth Connect gated on a missing Client ID/Secret. Pre-filled `slack.clientId`/`slack.clientSecret` (from Meni's Basic Information page) into local config (config.json — never shipped). **Verify:** `/auth/slack/start` → `302 https://slack.com/oauth/v2/authorize?...scope=channels:read,groups:read,chat:write,chat:write.public` (Connect now works). **Operator step (irreducible):** register redirect `http://localhost:3737/auth/slack/callback` in the Slack app (OAuth & Permissions → Redirect URLs) → click Connect → Allow → then private channels `trade`/`vsc-notif` list (groups:read granted).
+
+---
+
 ### 2026-06-24 06:15 — #54 distinct client per VS Code window (leverage MCP + extension)
 
 **Ask (Meni 2026-06-23).** Two VS Code windows on DIFFERENT workspaces collapsed into one client ("2 panels"). Meni's insight: leverage BOTH the MCP bridge and the extension for workspace info.

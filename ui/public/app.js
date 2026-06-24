@@ -1162,6 +1162,11 @@ function clearLog() {
   $("log-panel").innerHTML = "";
 }
 
+function toggleLog() {
+  const sec = $("log-section");
+  if (sec) sec.classList.toggle("collapsed");
+}
+
 function connectLogStream() {
   const dot = $("log-dot");
   const es = new EventSource("/api/logs");

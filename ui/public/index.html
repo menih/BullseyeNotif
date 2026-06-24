@@ -497,8 +497,11 @@
     </section>
     </div>
 
-    <div class="log-section">
+    <div class="log-section collapsed" id="log-section">
       <div class="log-header">
+        <button class="log-collapse" onclick="toggleLog()" title="Collapse / expand">
+          <svg class="log-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
         <div class="log-tabs">
           <button class="log-tab log-tab-active" data-ptab="log" onclick="selectPanelTab('log')">
             <span class="dot dot-ok" id="log-dot" style="display:inline-block"></span>
