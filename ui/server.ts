@@ -10,7 +10,7 @@ import { spawnSync, spawn } from "child_process";
 import open from "open";
 import notifier from "node-notifier";
 import nodemailer from "nodemailer";
-import twilio from "twilio";
+import { PinpointSMSVoiceV2Client, SendTextMessageCommand, DescribePhoneNumbersCommand, DescribeVerifiedDestinationNumbersCommand } from "@aws-sdk/client-pinpoint-sms-voice-v2";
 import { tmpdir } from "os";
 import { sendWithRouting } from "./messaging/notificationEngine.js";
 import { z } from "zod";
@@ -19,6 +19,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3737;
 const REDIRECT_URI = `http://localhost:${PORT}/auth/google/callback`;
+const SLACK_REDIRECT_URI = `http://localhost:${PORT}/auth/slack/callback`;
+// Bot scopes requested during the one-click OAuth connect. chat:write.public
+// lets the bot post to public channels without being invited first.
+const SLACK_OAUTH_SCOPES = "channels:read,groups:read,chat:write,chat:write.public";
 
 const PUBLIC_DIR = join(fileURLToPath(new URL("../../ui/public", import.meta.url)));
 
@@ -32,13 +36,13 @@ const ENABLE_MCP = (process.env.ENABLE_MCP ?? "").trim() === "1";
 function defaultConfig() {
   return {
     desktop: { enabled: false, sound: true },
-    telegram: { enabled: false, token: "", chatId: "" },
+    telegram: { enabled: false, token: "", chatIds: [] },
     whatsapp: { enabled: false, instanceId: "", apiToken: "", phone: "" },
-    sms: { enabled: false, accountSid: "", authToken: "", from: "", to: "" },
+    sms: { enabled: false, accessKeyId: "", secretAccessKey: "", region: "us-east-1", originationNumber: "", to: [] },
     email: { enabled: false, to: "" },
     ntfy: { enabled: false, topic: "", serverUrl: "" },
     discord: { enabled: false, webhookUrl: "", username: "Claude Notify" },
-    slack: { enabled: false, webhookUrl: "" },
+    slack: { enabled: false, webhookUrl: "", botToken: "", channels: [], clientId: "", clientSecret: "", team: "" },
     teams: { enabled: false, webhookUrl: "" },
     dnd: {
       enabled: false,      // manual toggle — when true, suppress all non-priority=high notifs
@@ -86,9 +90,37 @@ function isDndActive(cfg: Record<string, any>): boolean {
   }
 }
 
+// Forward-migrate legacy single-destination fields to the multi-destination
+// arrays so old config.json files keep working after the multi-destination
+// change. Mutates and returns the same object.
+function normalizeConfig(cfg: Record<string, any>): Record<string, any> {
+  if (cfg.telegram) {
+    if (!Array.isArray(cfg.telegram.chatIds)) {
+      const legacy = typeof cfg.telegram.chatId === "string" ? cfg.telegram.chatId.trim() : "";
+      cfg.telegram.chatIds = legacy ? [legacy] : [];
+    }
+    delete cfg.telegram.chatId;
+  }
+  if (cfg.sms) {
+    if (!Array.isArray(cfg.sms.to)) {
+      const legacy = typeof cfg.sms.to === "string" ? cfg.sms.to.trim() : "";
+      cfg.sms.to = legacy ? [legacy] : [];
+    }
+    // SMS moved from Twilio to AWS End User Messaging — drop the dead Twilio
+    // fields and ensure the AWS shape exists.
+    delete cfg.sms.accountSid; delete cfg.sms.authToken; delete cfg.sms.from;
+    if (typeof cfg.sms.region !== "string" || !cfg.sms.region) cfg.sms.region = "us-east-1";
+    if (typeof cfg.sms.originationNumber !== "string") cfg.sms.originationNumber = "";
+  }
+  if (cfg.slack && !Array.isArray(cfg.slack.channels)) {
+    cfg.slack.channels = [];
+  }
+  return cfg;
+}
+
 function loadConfig(): Record<string, any> {
   if (!existsSync(CONFIG_PATH)) return defaultConfig();
-  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+  return normalizeConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));
 }
 
 function saveConfig(config: Record<string, any>): void {
@@ -107,17 +139,25 @@ function displayTag(tag: string): string {
 
 const MASKED = "••••••••";
 
+// AWS SendTextMessage requires E.164 (e.g. +14089812202) — strip spaces, dashes,
+// parens, dots so a user-entered "+1 408 981 2202" is accepted.
+function e164(s: unknown): string {
+  return String(s ?? "").replace(/[^\d+]/g, "");
+}
+
 function maskSecrets(config: Record<string, any>): Record<string, any> {
   const c = JSON.parse(JSON.stringify(config));
   if (c.email?.pass) c.email.pass = MASKED;
   if (c.email?.clientSecret) c.email.clientSecret = MASKED;
   if (c.email?.refreshToken) c.email.refreshToken = MASKED;
   if (c.email?.accessToken) c.email.accessToken = MASKED;
-  if (c.sms?.authToken) c.sms.authToken = MASKED;
+  if (c.sms?.secretAccessKey) c.sms.secretAccessKey = MASKED;
   if (c.telegram?.token) c.telegram.token = MASKED;
   if (c.whatsapp?.apiToken) c.whatsapp.apiToken = MASKED;
   if (c.discord?.webhookUrl) c.discord.webhookUrl = MASKED;
   if (c.slack?.webhookUrl) c.slack.webhookUrl = MASKED;
+  if (c.slack?.botToken) c.slack.botToken = MASKED;
+  if (c.slack?.clientSecret) c.slack.clientSecret = MASKED;
   if (c.teams?.webhookUrl) c.teams.webhookUrl = MASKED;
   return c;
 }
@@ -144,11 +184,13 @@ function mergePreservingSecrets(
   guard(["email", "clientSecret"]);
   guard(["email", "refreshToken"]);
   guard(["email", "accessToken"]);
-  guard(["sms", "authToken"]);
+  guard(["sms", "secretAccessKey"]);
   guard(["telegram", "token"]);
   guard(["whatsapp", "apiToken"]);
   guard(["discord", "webhookUrl"]);
   guard(["slack", "webhookUrl"]);
+  guard(["slack", "botToken"]);
+  guard(["slack", "clientSecret"]);
   guard(["teams", "webhookUrl"]);
   return merged;
 }
@@ -447,39 +489,59 @@ app.post("/api/test/desktop", (_req, res) => {
 
 app.post("/api/test/telegram", async (_req, res) => {
   const config = loadConfig();
-  const { token, chatId } = config.telegram ?? {};
-  if (!token || !chatId) {
-    res.status(400).json({ error: "Token and Chat ID are required." });
+  const { token, chatIds } = config.telegram ?? {};
+  if (!token || !Array.isArray(chatIds) || chatIds.length === 0) {
+    res.status(400).json({ error: "Token and at least one chat are required." });
     return;
   }
-  try {
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: "Test from Claude Notify — Telegram is working!" }),
-    });
-    if (!r.ok) throw new Error(`Telegram ${r.status}: ${await r.text()}`);
-    res.json({ ok: true, message: "Telegram message sent!" });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
+  const errors: string[] = [];
+  let sent = 0;
+  for (const chatId of chatIds) {
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text: "Test from Claude Notify — Telegram is working!" }),
+      });
+      if (r.ok) sent++;
+      else errors.push(`${chatId}: ${r.status} ${await r.text()}`);
+    } catch (err) {
+      errors.push(`${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
+  if (sent === 0) { res.status(500).json({ error: errors.join("; ") }); return; }
+  res.json({ ok: true, message: `Telegram sent to ${sent} chat${sent === 1 ? "" : "s"}${errors.length ? ` (${errors.length} failed)` : ""}` });
 });
 
-app.get("/api/telegram/chatid", async (req, res) => {
+// List every distinct chat that has messaged the bot — drives the UI checklist
+// so the user picks chats by point-and-click instead of pasting numeric IDs.
+app.get("/api/telegram/chats", async (req, res) => {
   const token = (req.query.token as string) ?? loadConfig().telegram?.token;
-  if (!token || token === "••••••••") {
+  if (!token || token === MASKED) {
     res.status(400).json({ error: "Token required" });
     return;
   }
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates`);
     const json = await r.json() as any;
-    const chatId = json.result?.[0]?.message?.chat?.id?.toString();
-    if (!chatId) {
-      res.status(404).json({ error: "No messages yet — send any message to your bot first" });
+    if (json.ok === false) throw new Error(json.description ?? "getUpdates failed");
+    const byId = new Map<string, { id: string; name: string; type: string }>();
+    for (const u of json.result ?? []) {
+      const chat = u.message?.chat ?? u.channel_post?.chat ?? u.my_chat_member?.chat;
+      if (!chat?.id) continue;
+      const id = String(chat.id);
+      const name = chat.title
+        || [chat.first_name, chat.last_name].filter(Boolean).join(" ")
+        || (chat.username ? `@${chat.username}` : "")
+        || id;
+      byId.set(id, { id, name, type: chat.type ?? "private" });
+    }
+    const chats = [...byId.values()];
+    if (chats.length === 0) {
+      res.status(404).json({ error: "No chats yet — send any message to your bot (or add it to a group) first" });
       return;
     }
-    res.json({ chatId });
+    res.json({ chats });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -510,18 +572,28 @@ app.post("/api/test/whatsapp", async (_req, res) => {
 
 app.post("/api/test/sms", async (_req, res) => {
   const config = loadConfig();
-  const { accountSid, authToken, from, to } = config.sms ?? {};
-  if (!accountSid || !authToken || !from || !to) {
-    res.status(400).json({ error: "All SMS fields are required." });
+  const { accessKeyId, secretAccessKey, region, originationNumber, to } = config.sms ?? {};
+  if (!accessKeyId || !secretAccessKey || !region || !Array.isArray(to) || to.length === 0) {
+    res.status(400).json({ error: "AWS Access Key ID, Secret, Region and at least one recipient are required." });
     return;
   }
-  try {
-    const client = twilio(accountSid, authToken);
-    await client.messages.create({ body: "Test from Claude Notify — SMS is working!", from, to });
-    res.json({ ok: true, message: `SMS sent to ${to}` });
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
+  const client = new PinpointSMSVoiceV2Client({ region, credentials: { accessKeyId, secretAccessKey } });
+  const errors: string[] = [];
+  let sent = 0;
+  for (const num of to) {
+    try {
+      await client.send(new SendTextMessageCommand({
+        DestinationPhoneNumber: e164(num),
+        OriginationIdentity: e164(originationNumber) || undefined,
+        MessageBody: "Test from Claude Notify — SMS is working!",
+      }));
+      sent++;
+    } catch (err) {
+      errors.push(`${num}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
+  if (sent === 0) { res.status(500).json({ error: errors.join("; ") }); return; }
+  res.json({ ok: true, message: `SMS sent to ${sent} number${sent === 1 ? "" : "s"}${errors.length ? ` (${errors.length} failed)` : ""}` });
 });
 
 app.post("/api/test/email", async (_req, res) => {
@@ -595,12 +667,185 @@ app.post("/api/test/discord", async (_req, res) => {
 app.post("/api/test/slack", async (_req, res) => {
   const cfg = loadConfig();
   const sl = cfg.slack ?? {};
-  if (!sl.webhookUrl) { res.status(400).json({ error: "Webhook URL is required." }); return; }
+  const text = "🔔 *Claude Notify — test*\nTest from Claude Notify — Slack is working!";
+  // Bot-token + channel-checklist path posts to each selected channel (reusing
+  // the configured notify-bus token when no separate one is set); the legacy
+  // webhook path posts to its single bound channel.
+  const botToken = sl.botToken || slackCreds().token;
+  if (botToken && Array.isArray(sl.channels) && sl.channels.length > 0) {
+    const errors: string[] = [];
+    let sent = 0;
+    for (const channel of sl.channels) {
+      try {
+        const r = await fetch("https://slack.com/api/chat.postMessage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${botToken}` },
+          body: JSON.stringify({ channel, text }),
+        });
+        const json = await r.json() as any;
+        if (r.ok && json.ok) sent++;
+        else errors.push(`${channel}: ${json.error ?? r.status}`);
+      } catch (err) {
+        errors.push(`${channel}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (sent === 0) { res.status(500).json({ error: errors.join("; ") }); return; }
+    res.json({ ok: true, message: `Slack sent to ${sent} channel${sent === 1 ? "" : "s"}${errors.length ? ` (${errors.length} failed)` : ""}` });
+    return;
+  }
+  if (!sl.webhookUrl) { res.status(400).json({ error: "Pick channels (uses your configured Slack bus token), or set a webhook URL." }); return; }
   try {
-    const r = await fetch(sl.webhookUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "🔔 *Claude Notify — test*\nTest from Claude Notify — Slack is working!" }) });
+    const r = await fetch(sl.webhookUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
     if (!r.ok) throw new Error(`Slack ${r.status}: ${await r.text()}`);
     res.json({ ok: true, message: "Slack message sent!" });
   } catch (err) { res.status(500).json({ error: String(err) }); }
+});
+
+// List the bot's joinable channels — drives the UI checklist so the user picks
+// channels by point-and-click. Needs a bot token with channels:read (+ groups:read
+// for private channels). chat.postMessage to a channel also needs the bot to be a
+// member, so we surface is_member to flag channels the bot must be invited to.
+app.get("/api/slack/channels", async (req, res) => {
+  // Reuse the already-configured Slack bus bot token (notify-secrets.json / env)
+  // when the config UI hasn't been given a separate one — no re-pasting xoxb-.
+  const token = (req.query.token as string && req.query.token !== MASKED ? req.query.token as string : "")
+    || loadConfig().slack?.botToken
+    || slackCreds().token;
+  if (!token || token === MASKED) {
+    res.status(400).json({ error: "No Slack bot token found. Configure the notify bus token (notify-secrets.json) or paste an xoxb- token." });
+    return;
+  }
+  // Listing private channels needs groups:read; public needs channels:read.
+  // Try both, but if the token lacks groups:read, gracefully fall back to
+  // public-only instead of failing the whole call (Slack rejects the request
+  // entirely when ANY requested type's scope is missing).
+  const listFor = async (types: string) => {
+    const out: { id: string; name: string; isMember: boolean; isPrivate: boolean }[] = [];
+    let cursor = "";
+    do {
+      const url = `https://slack.com/api/conversations.list?limit=200&exclude_archived=true&types=${types}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const json = await r.json() as any;
+      if (!json.ok) throw new Error(json.error ?? "conversations.list failed");
+      for (const c of json.channels ?? []) {
+        out.push({ id: c.id, name: `#${c.name}`, isMember: !!c.is_member, isPrivate: !!c.is_private });
+      }
+      cursor = json.response_metadata?.next_cursor ?? "";
+    } while (cursor);
+    return out;
+  };
+  try {
+    let out: Awaited<ReturnType<typeof listFor>>;
+    let privateOmitted = false;
+    try {
+      out = await listFor("public_channel,private_channel");
+    } catch (e) {
+      if (!String(e).includes("missing_scope")) throw e;
+      out = await listFor("public_channel"); // token lacks groups:read — public only
+      privateOmitted = true;
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ channels: out, privateOmitted });
+  } catch (err) {
+    const msg = String(err);
+    if (msg.includes("missing_scope")) {
+      res.status(400).json({ error: "Your Slack bot token can't list channels (needs channels:read). Add it at api.slack.com/apps → OAuth & Permissions → Bot Token Scopes → Reinstall — or add a channel ID manually below." });
+      return;
+    }
+    res.status(500).json({ error: msg });
+  }
+});
+
+// Tells the UI whether a Slack bot token is already available (so it doesn't
+// nag the user to paste one). "bus" = the token the notify Slack bus already
+// uses (notify-secrets.json / env); "config" = one entered in the config UI.
+app.get("/api/slack/status", (_req, res) => {
+  const sl = loadConfig().slack ?? {};
+  const creds = slackCreds();
+  const source = sl.botToken ? "config" : creds.token ? "bus" : "none";
+  res.json({
+    botTokenConfigured: source !== "none",
+    source,
+    busChannel: creds.channel ?? null,
+    team: sl.team || null,
+    hasOAuthApp: !!(sl.clientId && sl.clientSecret),
+    redirectUri: SLACK_REDIRECT_URI,
+  });
+});
+
+// ── Slack one-click OAuth (browser "Authorize") ───────────────────────────────
+// Mirrors the Gmail OAuth flow: the user clicks Connect, authorizes in the
+// browser, and we capture the bot token WITH the right scopes via the callback —
+// no token-hunting, no manual scope toggling.
+app.get("/auth/slack/start", (_req, res) => {
+  const { clientId } = loadConfig().slack ?? {};
+  if (!clientId) { res.redirect("/?error=slack_missing_credentials"); return; }
+  const url = `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(clientId)}`
+    + `&scope=${encodeURIComponent(SLACK_OAUTH_SCOPES)}`
+    + `&redirect_uri=${encodeURIComponent(SLACK_REDIRECT_URI)}`;
+  res.redirect(url);
+});
+
+app.get("/auth/slack/callback", async (req, res) => {
+  const { code, error } = req.query as Record<string, string>;
+  if (error) { res.redirect(`/?error=${encodeURIComponent(error)}`); return; }
+  const cfg = loadConfig();
+  const { clientId, clientSecret } = cfg.slack ?? {};
+  if (!clientId || !clientSecret || !code) { res.redirect("/?error=slack_missing_credentials"); return; }
+  try {
+    const body = new URLSearchParams({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: SLACK_REDIRECT_URI });
+    const r = await fetch("https://slack.com/api/oauth.v2.access", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+    const json = await r.json() as any;
+    if (!json.ok) throw new Error(json.error ?? "oauth.v2.access failed");
+    cfg.slack = cfg.slack ?? {};
+    cfg.slack.botToken = json.access_token;       // xoxb- with the requested scopes
+    cfg.slack.team = json.team?.name ?? cfg.slack.team ?? "";
+    cfg.slack.enabled = true;
+    saveConfig(cfg);
+    res.redirect("/?success=slack_connected");
+  } catch (err) {
+    res.redirect(`/?error=${encodeURIComponent(String(err))}`);
+  }
+});
+
+app.delete("/auth/slack", (_req, res) => {
+  const cfg = loadConfig();
+  if (cfg.slack) { delete cfg.slack.botToken; delete cfg.slack.team; }
+  saveConfig(cfg);
+  res.json({ ok: true });
+});
+
+// Discover AWS numbers for point-and-click: `from` = your origination phone
+// numbers (DescribePhoneNumbers) for the From field; `verified` = sandbox
+// verified destinations (DescribeVerifiedDestinationNumbers) as quick-add chips
+// (accounts still in the SMS sandbox can only text verified numbers).
+app.get("/api/sms/numbers", async (req, res) => {
+  const cfg = loadConfig().sms ?? {};
+  const accessKeyId = (req.query.accessKeyId as string) || cfg.accessKeyId;
+  const secretRaw = (req.query.secretAccessKey as string) || cfg.secretAccessKey;
+  const secretAccessKey = secretRaw === MASKED ? cfg.secretAccessKey : secretRaw;
+  const region = (req.query.region as string) || cfg.region || "us-east-1";
+  if (!accessKeyId || !secretAccessKey) {
+    res.status(400).json({ error: "AWS Access Key ID and Secret required" });
+    return;
+  }
+  try {
+    const client = new PinpointSMSVoiceV2Client({ region, credentials: { accessKeyId, secretAccessKey } });
+    const [phones, verified] = await Promise.all([
+      client.send(new DescribePhoneNumbersCommand({})).then(r => r.PhoneNumbers ?? []).catch(() => []),
+      client.send(new DescribeVerifiedDestinationNumbersCommand({})).then(r => r.VerifiedDestinationNumbers ?? []).catch(() => []),
+    ]);
+    res.json({
+      from: phones.map((n: any) => ({ phoneNumber: n.PhoneNumber, label: `${n.PhoneNumber}${n.PhoneNumberType ? ` (${n.PhoneNumberType})` : ""}` })).filter((n: any) => n.phoneNumber),
+      verified: verified.map((n: any) => ({ phoneNumber: n.VerifiedDestinationNumber, label: n.VerifiedDestinationNumber })).filter((n: any) => n.phoneNumber),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 app.post("/api/test/teams", async (_req, res) => {
@@ -1015,12 +1260,12 @@ async function sendNotification(message: string, priority: "low" | "normal" | "h
       idleSeconds: idleSecs,
     },
     enableDesktop: !!cfg.desktop?.enabled,
-    enableTelegram: !!(cfg.telegram?.enabled && cfg.telegram.token && cfg.telegram.chatId),
+    enableTelegram: !!(cfg.telegram?.enabled && cfg.telegram.token && cfg.telegram.chatIds?.length),
     enableEmail: !!(cfg.email?.enabled && cfg.email.to),
-    enableSms: !!(cfg.sms?.enabled && cfg.sms.accountSid && cfg.sms.authToken && cfg.sms.from && cfg.sms.to),
+    enableSms: !!(cfg.sms?.enabled && cfg.sms.accessKeyId && cfg.sms.secretAccessKey && cfg.sms.region && cfg.sms.to?.length),
     enableNtfy: !!(cfg.ntfy?.enabled && cfg.ntfy.topic),
     enableDiscord: !!(cfg.discord?.enabled && cfg.discord.webhookUrl),
-    enableSlack: !!(cfg.slack?.enabled && cfg.slack.webhookUrl),
+    enableSlack: !!(cfg.slack?.enabled && ((cfg.slack.channels?.length && (cfg.slack.botToken || slackCreds().token)) || cfg.slack.webhookUrl)),
     enableTeams: !!(cfg.teams?.enabled && cfg.teams.webhookUrl),
     senders: {
       desktop: async () => {
@@ -1045,18 +1290,40 @@ async function sendNotification(message: string, priority: "low" | "normal" | "h
         });
       },
       telegram: async () => {
-        const body: Record<string, any> = { chat_id: cfg.telegram.chatId, text: message };
-        if (lastUserMessageId) body.reply_to_message_id = lastUserMessageId;
-        const r = await fetch(`https://api.telegram.org/bot${cfg.telegram.token}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!r.ok) throw new Error(await r.text());
+        const errors: string[] = [];
+        let sent = 0;
+        for (const chatId of cfg.telegram.chatIds as string[]) {
+          const body: Record<string, any> = { chat_id: chatId, text: message };
+          // reply_to only resolves in the chat the last inbound came from.
+          if (lastUserMessageId && chatId === lastUserChatId) body.reply_to_message_id = lastUserMessageId;
+          const r = await fetch(`https://api.telegram.org/bot${cfg.telegram.token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (r.ok) sent++;
+          else errors.push(`${chatId}: ${await r.text()}`);
+        }
+        if (sent === 0 && errors.length) throw new Error(errors.join("; "));
       },
       sms: async () => {
-        const smsClient = twilio(cfg.sms.accountSid, cfg.sms.authToken);
-        await smsClient.messages.create({ body: message, from: cfg.sms.from, to: cfg.sms.to });
+        const smsClient = new PinpointSMSVoiceV2Client({
+          region: cfg.sms.region,
+          credentials: { accessKeyId: cfg.sms.accessKeyId, secretAccessKey: cfg.sms.secretAccessKey },
+        });
+        const errors: string[] = [];
+        let sent = 0;
+        for (const num of cfg.sms.to as string[]) {
+          try {
+            await smsClient.send(new SendTextMessageCommand({
+              DestinationPhoneNumber: e164(num),
+              OriginationIdentity: e164(cfg.sms.originationNumber) || undefined,
+              MessageBody: message,
+            }));
+            sent++;
+          } catch (err) { errors.push(`${num}: ${err instanceof Error ? err.message : String(err)}`); }
+        }
+        if (sent === 0 && errors.length) throw new Error(errors.join("; "));
       },
       email: async () => {
         const email = cfg.email;
@@ -1117,16 +1384,34 @@ async function sendNotification(message: string, priority: "low" | "normal" | "h
       slack: async (_text, prio) => {
         const emojiMap: Record<string, string> = { low: "ℹ️", normal: "🔔", high: "🚨" };
         const emoji = emojiMap[prio] ?? emojiMap.normal;
+        const blocks = [
+          { type: "section", text: { type: "mrkdwn", text: `${emoji} *Claude Notify*\n${message}` } },
+          { type: "context", elements: [{ type: "mrkdwn", text: `Priority: ${prio}` }] },
+        ];
+        // Bot token + selected channels → one chat.postMessage per channel
+        // (reusing the configured notify-bus token when none is set in config);
+        // otherwise the legacy single-channel webhook.
+        const slackBotToken = cfg.slack.botToken || slackCreds().token;
+        if (slackBotToken && cfg.slack.channels?.length) {
+          const errors: string[] = [];
+          let sent = 0;
+          for (const channel of cfg.slack.channels as string[]) {
+            const r = await fetch("https://slack.com/api/chat.postMessage", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${slackBotToken}` },
+              body: JSON.stringify({ channel, text: `${emoji} *Claude Notify*`, blocks }),
+            });
+            const json = await r.json().catch(() => ({})) as { ok?: boolean; error?: string };
+            if (r.ok && json.ok) sent++;
+            else errors.push(`${channel}: ${json.error ?? r.status}`);
+          }
+          if (sent === 0 && errors.length) throw new Error(`Slack — ${errors.join("; ")}`);
+          return;
+        }
         const r = await fetch(cfg.slack.webhookUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: `${emoji} *Claude Notify*`,
-            blocks: [
-              { type: "section", text: { type: "mrkdwn", text: `${emoji} *Claude Notify*\n${message}` } },
-              { type: "context", elements: [{ type: "mrkdwn", text: `Priority: ${prio}` }] },
-            ],
-          }),
+          body: JSON.stringify({ text: `${emoji} *Claude Notify*`, blocks }),
         });
         if (!r.ok) throw new Error(`Slack ${r.status}: ${await r.text()}`);
       },
@@ -1262,6 +1547,7 @@ function takeWaitersFor(entryTag: string | undefined): InboxWaiter[] {
 }
 let tgPollOffset = -1;
 let lastUserMessageId: number | undefined;
+let lastUserChatId: string | undefined;
 // When the user pings us from Telegram, bypass idle-gating on outbound
 // notifs for a while — clearly they want a Telegram reply back, so we
 // shouldn't gate remote channels just because they're at the keyboard
@@ -1670,8 +1956,8 @@ async function startTelegramListener() {
   while (true) {
     try {
       const cfg = loadConfig();
-      const { token, chatId } = cfg.telegram ?? {};
-      if (!token || !chatId) {
+      const { token, chatIds } = cfg.telegram ?? {};
+      if (!token || !Array.isArray(chatIds) || chatIds.length === 0) {
         await new Promise(r => setTimeout(r, 5000));
         continue;
       }
@@ -1694,9 +1980,11 @@ async function startTelegramListener() {
       for (const update of json.result ?? []) {
         tgPollOffset = update.update_id + 1;
         const msg = update.message;
-        if (msg?.chat?.id?.toString() === chatId && msg.text) {
+        const fromChatId = msg?.chat?.id?.toString();
+        if (fromChatId && chatIds.includes(fromChatId) && msg.text) {
           log("←", "telegram", msg.text);
           lastUserMessageId = msg.message_id;
+          lastUserChatId = fromChatId;
           lastTelegramInboundAt = Date.now();
           const { tag, text } = parseTag(msg.text);
           // Match an outstanding ask first. If the message is tagged, only
@@ -1748,7 +2036,7 @@ async function startTelegramListener() {
             fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                chat_id: chatId,
+                chat_id: fromChatId,
                 text: ackText,
                 reply_to_message_id: msg.message_id,
               }),
@@ -1798,10 +2086,51 @@ function loadSecrets(): Record<string, any> {
 function slackCreds(): { token?: string; channel?: string; webhook?: string } {
   const s = loadSecrets().slack ?? {};
   const cfgSlack = loadConfig().slack ?? {};
-  const token = (process.env.SLACK_BOT_TOKEN ?? s.botToken ?? "").trim() || undefined;
+  const token = (process.env.SLACK_BOT_TOKEN ?? s.botToken ?? cfgSlack.botToken ?? "").trim() || undefined;
   const channel = (process.env.SLACK_CHANNEL_ID ?? s.channelId ?? "").trim() || undefined;
   const webhook = (s.webhookUrl ?? cfgSlack.webhookUrl ?? "").trim() || undefined;
   return { token, channel, webhook };
+}
+
+// Brainless config: on startup, copy any credentials already present in
+// notify-secrets.json (decoded) into config.json's EMPTY fields, so a user who
+// has the shared secrets file gets every channel pre-wired without touching the
+// UI. Never overwrites a value the user already set. Idempotent.
+function importCredsOnStart(): void {
+  let secrets: Record<string, any>;
+  try { secrets = loadSecrets(); } catch { return; }
+  if (!secrets || Object.keys(secrets).length === 0) return;
+  const cfg = loadConfig();
+  let changed = false;
+  const fill = (sec: string, key: string, val: any) => {
+    if (val === undefined || val === null || val === "") return;
+    cfg[sec] = cfg[sec] ?? {};
+    if (cfg[sec][key] === undefined || cfg[sec][key] === "" ) { cfg[sec][key] = val; changed = true; }
+  };
+  const fillArrayFromScalar = (sec: string, arrKey: string, val: any) => {
+    if (val === undefined || val === null || val === "") return;
+    cfg[sec] = cfg[sec] ?? {};
+    if (!Array.isArray(cfg[sec][arrKey]) || cfg[sec][arrKey].length === 0) { cfg[sec][arrKey] = [String(val)]; changed = true; }
+  };
+  if (secrets.telegram) {
+    fill("telegram", "token", secrets.telegram.token);
+    fillArrayFromScalar("telegram", "chatIds", secrets.telegram.chatId);
+  }
+  if (secrets.email) for (const k of ["host", "port", "secure", "user", "pass", "connectedEmail", "to"]) fill("email", k, secrets.email[k]);
+  if (secrets.slack) {
+    fill("slack", "botToken", secrets.slack.botToken);
+    fill("slack", "webhookUrl", secrets.slack.webhookUrl);
+    fillArrayFromScalar("slack", "channels", secrets.slack.channelId);
+  }
+  if (secrets.ntfy) { fill("ntfy", "token", secrets.ntfy.token); fill("ntfy", "topic", secrets.ntfy.topic); }
+  if (secrets.sms) {
+    for (const k of ["accessKeyId", "secretAccessKey", "region", "originationNumber"]) fill("sms", k, secrets.sms[k]);
+    if (secrets.sms.enabled && cfg.sms?.accessKeyId && cfg.sms.enabled !== true) { cfg.sms.enabled = true; changed = true; }
+  }
+  if (changed) {
+    saveConfig(cfg);
+    log("·", "import", "imported credentials from notify-secrets.json into config.json (empty fields only)");
+  }
 }
 
 async function slackPost(text: string): Promise<void> {
@@ -2181,19 +2510,21 @@ function createMcpServer(clientId: string, sessionTag?: string) {
       const cfg = loadConfig();
 
       log("→", "ask:telegram", question, clientId);
-      if (cfg.telegram?.enabled && cfg.telegram.token && cfg.telegram.chatId) {
+      if (cfg.telegram?.enabled && cfg.telegram.token && cfg.telegram.chatIds?.length) {
         const askPrefix = `❓ [${clientId}]`;
         const replyHint = sessionTag
           ? `\n\nReply with: @${sessionTag} <your answer>`
           : `\n\nReply to this message with your answer.`;
-        await fetch(`https://api.telegram.org/bot${cfg.telegram.token}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: cfg.telegram.chatId,
-            text: `${askPrefix} ${question}${replyHint}`,
-          }),
-        }).catch((err) => log("→", "ask:telegram", `ERROR: ${err}`, clientId));
+        for (const chatId of cfg.telegram.chatIds as string[]) {
+          await fetch(`https://api.telegram.org/bot${cfg.telegram.token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: `${askPrefix} ${question}${replyHint}`,
+            }),
+          }).catch((err) => log("→", "ask:telegram", `ERROR: ${err}`, clientId));
+        }
       }
 
       const email = cfg.email ?? {};
@@ -2672,10 +3003,14 @@ const httpServer = app.listen(PORT, "0.0.0.0", () => {
   }
   // Live Slack/Telegram pollers hit real external channels — never under test.
   if (process.env.NOTIFY_MCP_TEST_ENDPOINTS !== "1") {
+    importCredsOnStart();
     startTelegramListener();
     startSlackListener();
   }
-  open(`http://localhost:${PORT}`).catch(() => {});
+  // Only auto-open the browser on a genuine first run (no config yet). A plain
+  // restart must NOT pop the UI — set NOTIFY_MCP_NO_OPEN=1 to force-suppress.
+  const suppressOpen = process.env.NOTIFY_MCP_NO_OPEN === "1" || process.env.BROWSER === "none" || existsSync(CONFIG_PATH);
+  if (!suppressOpen) open(`http://localhost:${PORT}`).catch(() => {});
 });
 
 // TCP-level keepalive on every incoming socket. Without this, a client that

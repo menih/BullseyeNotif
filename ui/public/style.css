@@ -689,3 +689,62 @@ p.hint code {
 .toast.hidden { opacity: 0; pointer-events: none; transform: translateX(-50%) translateY(8px); }
 
 .hidden { display: none !important; }
+
+/* ── Multi-destination chips + checklist pickers ─────────────────────────── */
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 22px; align-items: center; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent-d); border: 1px solid var(--accent);
+  color: var(--text); font-size: 12px; font-weight: 600;
+  padding: 3px 7px 3px 10px; border-radius: 14px; max-width: 100%;
+}
+.chip-x { cursor: pointer; font-size: 15px; line-height: 1; opacity: .65; }
+.chip-x:hover { opacity: 1; }
+.chip-empty { color: var(--text-3); font-size: 12px; font-style: italic; }
+
+.dest-add { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+.picker {
+  border: 1px solid var(--border); border-radius: 7px;
+  background: #0d0d18; padding: 5px; max-height: 190px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.picker-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 5px; cursor: pointer; font-size: 12px;
+  color: var(--text);
+}
+.picker-item:hover { background: rgba(255,255,255,0.05); }
+.picker-item input { accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; }
+.picker-actions {
+  display: flex; gap: 6px; padding: 6px 2px 2px;
+  position: sticky; bottom: 0; background: #0d0d18;
+}
+.picker-empty { color: var(--text-3); font-size: 12px; padding: 8px; }
+.picker-note { color: var(--text-2); font-size: 11px; padding: 6px 8px; line-height: 1.45; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.picker-note a { color: var(--accent); font-weight: 600; }
+.picker-note code { background: #1a1a2e; padding: 1px 5px; border-radius: 4px; }
+
+/* ── Compact layout — narrow widths (VS Code activity-bar panel) ──────────── */
+/* The same UI is embedded as-is in the VS Code extension webview. At a narrow
+   width it collapses to a single scrolling column so it fits the side panel. */
+
+@media (max-width: 620px) {
+  html, body { height: auto; }
+  body { font-size: 12px; }
+
+  header { padding: 0 12px; min-height: 44px; gap: 8px; flex-wrap: wrap; }
+  .subtitle { display: none; }
+
+  main { padding: 8px; gap: 8px; overflow: visible; }
+
+  .config-panel { flex-direction: column; height: auto; overflow: visible; }
+  .section { height: auto; overflow: visible; padding: 10px 10px 12px; }
+  .section + .section { border-left: none; border-top: 1px solid var(--border); }
+
+  .card-list { grid-template-columns: 1fr; height: auto; overflow: visible; gap: 8px; }
+  .row2 { grid-template-columns: 1fr; }
+
+  .log-section { min-height: 220px; }
+}

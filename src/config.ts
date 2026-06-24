@@ -12,7 +12,7 @@ export interface DesktopConfig {
 export interface TelegramConfig {
   enabled: boolean;
   token: string;
-  chatId: string;
+  chatIds: string[];
 }
 
 export interface WhatsAppConfig {
@@ -24,10 +24,11 @@ export interface WhatsAppConfig {
 
 export interface SmsConfig {
   enabled: boolean;
-  accountSid: string;
-  authToken: string;
-  from: string;
-  to: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string;
+  originationNumber: string;
+  to: string[];
 }
 
 export interface EmailConfig {
@@ -63,6 +64,8 @@ export interface DiscordConfig {
 export interface SlackConfig {
   enabled: boolean;
   webhookUrl: string;
+  botToken?: string;
+  channels?: string[];
 }
 
 export interface TeamsConfig {

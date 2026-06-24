@@ -2,4 +2,9 @@
 .gitignore
 node_modules/**
 *.vsix
+scripts/**
+release.sh
+.secrets
+.secrets.*
+**/*.map
 # Keep screenshots/ in the .vsix (referenced by README.md)

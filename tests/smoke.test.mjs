@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -601,4 +601,52 @@ test("/api/clients folds same-session-id subagents into one interactive panel", 
   panels = (await (await fetch(`http://localhost:${port}/api/clients`)).json())
     .clients.filter(x => x.tag === tag);
   assert.equal(panels.length, 2, `distinct hsid is its own panel: expected 2, got ${panels.length}`);
+});
+
+// #47 — a legacy single-destination config (telegram.chatId string, sms.to
+// string, no slack.channels) auto-migrates to the multi-destination arrays when
+// the server loads it, so old config.json files keep working.
+test("legacy chatId/to config migrates to multi-destination arrays on load", async () => {
+  writeFileSync(join(TEST_CONFIG_DIR, "config.json"), JSON.stringify({
+    telegram: { enabled: true, token: "x", chatId: "555" },
+    sms: { enabled: true, accountSid: "AC", authToken: "t", from: "+1", to: "+1999" },
+    slack: { enabled: true, webhookUrl: "w" },
+  }));
+  const cfg = await (await fetch(`http://localhost:${port}/api/config`)).json();
+  assert.deepEqual(cfg.telegram.chatIds, ["555"], "chatId should migrate to chatIds[]");
+  assert.equal(cfg.telegram.chatId, undefined, "legacy chatId should be removed");
+  assert.deepEqual(cfg.sms.to, ["+1999"], "sms.to string should migrate to an array");
+  assert.equal(cfg.sms.accountSid, undefined, "legacy Twilio accountSid should be stripped");
+  assert.equal(cfg.sms.from, undefined, "legacy Twilio from should be stripped");
+  assert.equal(cfg.sms.region, "us-east-1", "AWS region default should be applied");
+  assert.deepEqual(cfg.slack.channels, [], "slack.channels[] should be initialized");
+});
+
+// #47 — multi-destination arrays persist through save; slack.botToken is masked
+// in GET and survives a re-save that sends the masked sentinel (secret guard),
+// while other fields (channels) still update.
+test("multi-destination arrays round-trip; slack botToken masks + survives re-save", async () => {
+  const post = (body) => fetch(`http://localhost:${port}/api/config`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const get = async () => (await (await fetch(`http://localhost:${port}/api/config`)).json());
+
+  await post({
+    telegram: { enabled: true, token: "tok", chatIds: ["111", "222"] },
+    sms: { enabled: true, accessKeyId: "AKIA", secretAccessKey: "sk", region: "us-east-1", originationNumber: "+1000", to: ["+1222", "+1333"] },
+    slack: { enabled: true, botToken: "xoxb-secret", channels: ["C111", "C222"], webhookUrl: "" },
+  });
+  let cfg = await get();
+  assert.deepEqual(cfg.telegram.chatIds, ["111", "222"], "telegram chatIds should persist");
+  assert.deepEqual(cfg.sms.to, ["+1222", "+1333"], "sms recipients should persist");
+  assert.deepEqual(cfg.slack.channels, ["C111", "C222"], "slack channels should persist");
+  const masked = cfg.slack.botToken;
+  assert.notEqual(masked, "xoxb-secret", "botToken must not be returned in clear");
+  assert.ok(masked && masked.length > 0, "botToken should be masked, not empty");
+
+  // Re-save with the masked sentinel — must keep the stored token, update channels.
+  await post({ slack: { enabled: true, botToken: masked, channels: ["C333"], webhookUrl: "" } });
+  cfg = await get();
+  assert.deepEqual(cfg.slack.channels, ["C333"], "channels should update on re-save");
+  assert.equal(cfg.slack.botToken, masked, "botToken should be preserved (not blanked) on masked re-save");
 });

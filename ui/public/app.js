@@ -2,6 +2,23 @@
 
 let config = {};
 
+// Multi-destination working state (the source of truth while editing; saved to
+// config as plain ID arrays). Name caches survive config reloads so chips keep
+// their friendly labels even though the server only stores IDs.
+const MASKED = "••••••••";
+let telegramChats = [];          // [{ id, name }]
+let smsNumbers = [];             // [string]
+let slackChannels = [];          // [{ id, name }]
+const tgNameCache = {};          // id → name
+const slackNameCache = {};       // id → name
+
+// Returns the field value only when it's a real (non-masked) secret, so detect/
+// discover calls fall back to the server-saved secret instead of sending "••••".
+function realSecret(id) {
+  const v = $(id).value.trim();
+  return v && v !== MASKED ? v : "";
+}
+
 // ── Card collapse/expand ──────────────────────────────────────────────────
 
 function toggleCard(id) {
@@ -20,13 +37,18 @@ async function init() {
 function handleUrlParams() {
   const params = new URLSearchParams(location.search);
   if (params.has("success")) {
-    const msg = params.get("success") === "gmail_connected"
-      ? "Gmail connected successfully!"
+    const s = params.get("success");
+    const msg = s === "gmail_connected" ? "Gmail connected successfully!"
+      : s === "slack_connected" ? "Slack connected!"
       : "Success!";
     toast(msg, "ok");
   }
   if (params.has("error")) {
-    toast("Error: " + decodeURIComponent(params.get("error")), "error");
+    const e = decodeURIComponent(params.get("error"));
+    const msg = e === "slack_missing_credentials"
+      ? "Add your Slack Client ID + Client Secret first, then Connect."
+      : "Error: " + e;
+    toast(msg, "error");
   }
   if (params.toString()) {
     history.replaceState({}, "", location.pathname);
@@ -66,16 +88,23 @@ function populateForm() {
   const tg = config.telegram ?? {};
   $("telegram-enabled").checked = !!tg.enabled;
   $("telegram-token").value = tg.token ?? "";
-  $("telegram-chatid").value = tg.chatId ?? "";
-
+  telegramChats = (Array.isArray(tg.chatIds) ? tg.chatIds : []).map(id => ({ id: String(id), name: tgNameCache[id] || String(id) }));
+  renderTelegramChips();
 
   // SMS
   const sms = config.sms ?? {};
   $("sms-enabled").checked = !!sms.enabled;
-  $("sms-sid").value = sms.accountSid ?? "";
-  $("sms-token").value = sms.authToken ?? "";
-  $("sms-from").value = sms.from ?? "";
-  $("sms-to").value = sms.to ?? "";
+  $("sms-accesskey").value = sms.accessKeyId ?? "";
+  $("sms-secret").value = sms.secretAccessKey ?? "";
+  $("sms-region").value = sms.region ?? "us-east-1";
+  $("sms-from").value = sms.originationNumber ?? "";
+  smsNumbers = Array.isArray(sms.to) ? sms.to.map(s => String(s).replace(/[^\d+]/g, "")) : [];
+  renderSmsChips();
+  const smsStatus = $("sms-status");
+  if (smsStatus) {
+    if (sms.accessKeyId) { smsStatus.textContent = "✓ AWS credentials configured."; smsStatus.classList.remove("hidden"); }
+    else smsStatus.classList.add("hidden");
+  }
 
   // ntfy
   const ntfy = config.ntfy ?? {};
@@ -94,6 +123,12 @@ function populateForm() {
   const sl = config.slack ?? {};
   $("slack-enabled").checked = !!sl.enabled;
   $("slack-webhook").value = sl.webhookUrl ?? "";
+  $("slack-bottoken").value = sl.botToken ?? "";
+  $("slack-clientid").value = sl.clientId ?? "";
+  $("slack-clientsecret").value = sl.clientSecret ?? "";
+  slackChannels = (Array.isArray(sl.channels) ? sl.channels : []).map(id => ({ id: String(id), name: slackNameCache[id] || String(id) }));
+  renderSlackChips();
+  refreshSlackTokenStatus();
 
   // Teams
   const tm = config.teams ?? {};
@@ -146,16 +181,18 @@ function updateBadges() {
     email.connectedEmail ? "Connected" : email.clientId ? "Credentials saved" : "Not configured");
 
   const tg = config.telegram ?? {};
-  const tgReady = tg.token && tg.chatId;
+  const tgCount = Array.isArray(tg.chatIds) ? tg.chatIds.length : 0;
+  const tgReady = tg.token && tgCount > 0;
   setBadge("telegram",
     tg.enabled && tgReady ? "ok" : tgReady ? "warn" : tg.token ? "warn" : "idle",
-    tg.enabled && tgReady ? "Configured" : tgReady ? "Disabled" : tg.token ? "Incomplete" : "Not configured");
+    tg.enabled && tgReady ? `${tgCount} chat${tgCount === 1 ? "" : "s"}` : tgReady ? "Disabled" : tg.token ? "Incomplete" : "Not configured");
 
   const sms = config.sms ?? {};
-  const smsReady = sms.accountSid && sms.authToken;
+  const smsCount = Array.isArray(sms.to) ? sms.to.length : 0;
+  const smsReady = sms.accessKeyId && sms.secretAccessKey && sms.region && smsCount > 0;
   setBadge("sms",
-    sms.enabled && smsReady ? "ok" : smsReady ? "warn" : sms.accountSid ? "warn" : "idle",
-    sms.enabled && smsReady ? "Configured" : smsReady ? "Disabled" : sms.accountSid ? "Incomplete" : "Not configured");
+    sms.enabled && smsReady ? "ok" : smsReady ? "warn" : sms.accessKeyId ? "warn" : "idle",
+    sms.enabled && smsReady ? `${smsCount} number${smsCount === 1 ? "" : "s"}` : smsReady ? "Disabled" : sms.accessKeyId ? "Incomplete" : "Not configured");
 
   const ntfyC = config.ntfy ?? {};
   if (ntfyC.topic) {
@@ -176,8 +213,11 @@ function updateBadges() {
     dcC.enabled && dcC.webhookUrl ? "Configured" : dcC.webhookUrl ? "Disabled" : "Not configured");
 
   const slC = config.slack ?? {};
-  setBadge("slack", slC.enabled && slC.webhookUrl ? "ok" : slC.webhookUrl ? "warn" : "idle",
-    slC.enabled && slC.webhookUrl ? "Configured" : slC.webhookUrl ? "Disabled" : "Not configured");
+  const slCount = Array.isArray(slC.channels) ? slC.channels.length : 0;
+  const slReady = (slC.botToken && slCount > 0) || slC.webhookUrl;
+  const slLabel = slC.botToken && slCount > 0 ? `${slCount} channel${slCount === 1 ? "" : "s"}` : slC.webhookUrl ? "Webhook" : "Not configured";
+  setBadge("slack", slC.enabled && slReady ? "ok" : slReady ? "warn" : "idle",
+    slC.enabled && slReady ? slLabel : slReady ? "Disabled" : "Not configured");
 
   const tmC = config.teams ?? {};
   setBadge("teams", tmC.enabled && tmC.webhookUrl ? "ok" : tmC.webhookUrl ? "warn" : "idle",
@@ -265,24 +305,46 @@ async function saveTelegram() {
     telegram: {
       enabled: $("telegram-enabled").checked,
       token: $("telegram-token").value.trim(),
-      chatId: $("telegram-chatid").value.trim(),
+      chatIds: telegramChats.map(c => c.id),
     },
   });
 }
 
-async function detectChatId() {
-  const token = $("telegram-token").value.trim();
-  if (!token) { toast("Enter bot token first.", "error"); return; }
-  try {
-    const res = await fetch(`/api/telegram/chatid?token=${encodeURIComponent(token)}`);
+function renderTelegramChips() {
+  renderChips("telegram-chips", telegramChats.map(c => c.name), i => {
+    telegramChats.splice(i, 1);
+    renderTelegramChips();
+    saveTelegram();
+  });
+}
+
+function addTelegramChatManual() {
+  const id = $("telegram-chat-manual").value.trim();
+  if (!id) return;
+  if (!telegramChats.some(c => c.id === id)) {
+    telegramChats.push({ id, name: tgNameCache[id] || id });
+    renderTelegramChips();
+    saveTelegram();
+  }
+  $("telegram-chat-manual").value = "";
+}
+
+async function detectTelegramChats() {
+  const q = realSecret("telegram-token");
+  const url = "/api/telegram/chats" + (q ? `?token=${encodeURIComponent(q)}` : "");
+  await withButton(event, async () => {
+    const res = await fetch(url);
     const json = await res.json();
     if (!res.ok) throw new Error(json.error);
-    $("telegram-chatid").value = json.chatId;
-    await saveTelegram();
-    toast("Chat ID detected: " + json.chatId, "ok");
-  } catch (e) {
-    toast("" + e, "error");
-  }
+    json.chats.forEach(c => { tgNameCache[c.id] = c.name; });
+    showPicker("telegram-chat-picker", json.chats.map(c => ({
+      id: c.id, label: `${c.name}${c.type && c.type !== "private" ? ` · ${c.type}` : ""}`,
+    })), telegramChats.map(c => c.id), picked => {
+      telegramChats = picked.map(id => ({ id, name: tgNameCache[id] || id }));
+      renderTelegramChips();
+      saveTelegram();
+    });
+  }, "Detecting…");
 }
 
 async function saveDnd() {
@@ -318,12 +380,64 @@ async function saveSms() {
   await patch({
     sms: {
       enabled: $("sms-enabled").checked,
-      accountSid: $("sms-sid").value.trim(),
-      authToken: $("sms-token").value.trim(),
-      from: $("sms-from").value.trim(),
-      to: $("sms-to").value.trim(),
+      accessKeyId: $("sms-accesskey").value.trim(),
+      secretAccessKey: $("sms-secret").value.trim(),
+      region: $("sms-region").value.trim() || "us-east-1",
+      originationNumber: $("sms-from").value.trim(),
+      to: [...smsNumbers],
     },
   });
+}
+
+function renderSmsChips() {
+  renderChips("sms-chips", smsNumbers, i => {
+    smsNumbers.splice(i, 1);
+    renderSmsChips();
+    saveSms();
+  });
+}
+
+function addSmsNumber(num) {
+  // Normalize to E.164 (strip spaces/dashes/parens) — AWS rejects formatted numbers.
+  const n = (num || "").replace(/[^\d+]/g, "");
+  if (n && !smsNumbers.includes(n)) {
+    smsNumbers.push(n);
+    renderSmsChips();
+    saveSms();
+  }
+}
+
+function addSmsNumberManual() {
+  addSmsNumber($("sms-to-manual").value);
+  $("sms-to-manual").value = "";
+}
+
+async function discoverSmsNumbers() {
+  const key = $("sms-accesskey").value.trim();
+  const sec = realSecret("sms-secret");
+  const region = $("sms-region").value.trim() || "us-east-1";
+  const params = new URLSearchParams();
+  if (key) params.set("accessKeyId", key);
+  if (sec) params.set("secretAccessKey", sec);
+  params.set("region", region);
+  await withButton(event, async () => {
+    const res = await fetch(`/api/sms/numbers?${params}`);
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error);
+    // Origination numbers → datalist suggestions for the From field.
+    $("sms-from-list").innerHTML = (json.from || [])
+      .map(n => `<option value="${escHtml(n.phoneNumber)}">${escHtml(n.label)}</option>`).join("");
+    if ((json.from || []).length && !$("sms-from").value.trim()) { $("sms-from").value = json.from[0].phoneNumber; saveSms(); }
+    // Sandbox verified destinations → quick-add recipient checklist.
+    const verified = (json.verified || []).filter(n => !smsNumbers.includes(n.phoneNumber));
+    if (verified.length) {
+      showPicker("sms-verified-picker", verified.map(n => ({ id: n.phoneNumber, label: n.label })),
+        [], picked => { picked.forEach(addSmsNumber); }, "Add selected recipients");
+    } else {
+      $("sms-verified-picker").classList.add("hidden");
+    }
+    toast(`Found ${(json.from || []).length} origination + ${(json.verified || []).length} verified number(s)`, "ok");
+  }, "Discovering…");
 }
 
 async function saveNtfy() {
@@ -338,7 +452,124 @@ async function saveDiscord() {
   await patch({ discord: { enabled: $("discord-enabled").checked, webhookUrl: $("discord-webhook").value.trim(), username: $("discord-username").value.trim() || "Claude Notify" } });
 }
 async function saveSlack() {
-  await patch({ slack: { enabled: $("slack-enabled").checked, webhookUrl: $("slack-webhook").value.trim() } });
+  await patch({
+    slack: {
+      enabled: $("slack-enabled").checked,
+      webhookUrl: $("slack-webhook").value.trim(),
+      botToken: $("slack-bottoken").value.trim(),
+      channels: slackChannels.map(c => c.id),
+      clientId: $("slack-clientid").value.trim(),
+      clientSecret: $("slack-clientsecret").value.trim(),
+    },
+  });
+}
+
+async function disconnectSlack() {
+  if (!confirm("Disconnect Slack? You can reconnect with one click.")) return;
+  try {
+    await fetch("/auth/slack", { method: "DELETE" });
+    toast("Slack disconnected", "ok");
+    await loadConfig();
+  } catch (e) { toast("Error: " + e, "error"); }
+}
+
+function renderSlackChips() {
+  renderChips("slack-chips", slackChannels.map(c => c.name), i => {
+    slackChannels.splice(i, 1);
+    renderSlackChips();
+    saveSlack();
+  });
+}
+
+function addSlackChannelManual() {
+  const id = $("slack-channel-manual").value.trim();
+  if (!id) return;
+  if (!slackChannels.some(c => c.id === id)) {
+    slackChannels.push({ id, name: slackNameCache[id] || id });
+    renderSlackChips();
+    saveSlack();
+  }
+  $("slack-channel-manual").value = "";
+}
+
+async function refreshSlackTokenStatus() {
+  const el = $("slack-token-status");
+  if (!el) return;
+  try {
+    const s = await (await fetch("/api/slack/status")).json();
+    if (s.redirectUri && $("slack-redirect")) $("slack-redirect").textContent = s.redirectUri;
+    // A working token already exists → hide the entire Connect/OAuth setup so the
+    // user is never prompted to log in (covers Google-SSO Slack users with no
+    // password). The connect form only shows when nothing is configured yet.
+    if ($("slack-oauth")) $("slack-oauth").classList.toggle("hidden", !!s.botTokenConfigured);
+    if (!s.botTokenConfigured) { el.classList.add("hidden"); return; }
+    el.innerHTML = "";
+    const span = document.createElement("span");
+    span.textContent = s.team
+      ? `✓ Connected to ${s.team}.`
+      : s.source === "bus"
+        ? "✓ Slack is already configured — pick channels below."
+        : "✓ Slack bot token saved.";
+    el.appendChild(span);
+    // Offer the already-configured bus channel as a one-click add (readable
+    // button, not an inline link).
+    if (s.busChannel && !slackChannels.some(c => c.id === s.busChannel)) {
+      const btn = document.createElement("button");
+      btn.className = "btn btn-sm btn-primary";
+      btn.style.marginLeft = "auto";
+      btn.textContent = `+ Add ${s.busChannel}`;
+      btn.onclick = () => addSlackChannel(s.busChannel, s.busChannel);
+      el.appendChild(btn);
+    }
+    // Keep Disconnect reachable for OAuth-connected workspaces even though the
+    // setup form is hidden.
+    if (s.team) {
+      const dc = document.createElement("button");
+      dc.className = "btn btn-sm btn-danger";
+      dc.style.marginLeft = "8px";
+      dc.textContent = "Disconnect";
+      dc.onclick = disconnectSlack;
+      el.appendChild(dc);
+    }
+    el.classList.remove("hidden");
+  } catch { el.classList.add("hidden"); }
+}
+
+function addSlackChannel(id, name) {
+  if (!slackChannels.some(c => c.id === id)) {
+    slackChannels.push({ id, name: name || id });
+    renderSlackChips();
+    saveSlack();
+  }
+}
+
+async function loadSlackChannels() {
+  const q = realSecret("slack-bottoken");
+  const url = "/api/slack/channels" + (q ? `?token=${encodeURIComponent(q)}` : "");
+  await withButton(event, async () => {
+    const res = await fetch(url);
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error);
+    json.channels.forEach(c => { slackNameCache[c.id] = c.name; });
+    showPicker("slack-channel-picker", json.channels.map(c => ({
+      id: c.id, label: `${c.name}${c.isPrivate ? " 🔒" : ""}${c.isMember ? "" : " · invite bot"}`,
+    })), slackChannels.map(c => c.id), picked => {
+      slackChannels = picked.map(id => ({ id, name: slackNameCache[id] || id }));
+      renderSlackChips();
+      saveSlack();
+    });
+    // Private channels (e.g. #trade) are invisible without groups:read — say so
+    // and surface the OAuth Connect (which requests that scope).
+    if (json.privateOmitted) {
+      const el = $("slack-channel-picker");
+      const note = document.createElement("div");
+      note.className = "picker-note";
+      note.innerHTML = 'Only <b>public</b> channels shown. Your <b>private</b> channels (e.g. #trade, #vsc-notif) need the <code>groups:read</code> scope — <a href="#" id="slack-reconnect-link">Connect Slack</a> to include them.';
+      el.insertBefore(note, el.firstChild);
+      const link = $("slack-reconnect-link");
+      if (link) link.onclick = (e) => { e.preventDefault(); const o = $("slack-oauth"); if (o) { o.classList.remove("hidden"); o.scrollIntoView({ behavior: "smooth", block: "center" }); } };
+    }
+  }, "Loading…");
 }
 async function saveTeams() {
   await patch({ teams: { enabled: $("teams-enabled").checked, webhookUrl: $("teams-webhook").value.trim() } });
@@ -593,6 +824,45 @@ function toast(msg, type = "ok") {
 // ── Utils ─────────────────────────────────────────────────────────────────
 
 function $(id) { return document.getElementById(id); }
+
+// ── Multi-destination chips + checklist pickers ─────────────────────────────
+
+// Press-feedback wrapper: disables the clicked button + shows a busy label while
+// an async action runs, restores it after, and toasts any error.
+async function withButton(ev, fn, busyLabel) {
+  const btn = ev && (ev.currentTarget || ev.target);
+  const orig = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; if (busyLabel) btn.innerHTML = busyLabel; }
+  try { await fn(); }
+  catch (e) { toast("" + (e && e.message ? e.message : e), "error"); }
+  finally { if (btn && orig !== null) { btn.disabled = false; btn.innerHTML = orig; } }
+}
+
+function renderChips(containerId, labels, onRemove) {
+  const el = $(containerId);
+  if (!labels.length) { el.innerHTML = `<span class="chip-empty">None yet</span>`; return; }
+  el.innerHTML = labels.map((l, i) =>
+    `<span class="chip">${escHtml(l)}<span class="chip-x" data-i="${i}" title="Remove">×</span></span>`).join("");
+  el.querySelectorAll(".chip-x").forEach(x => { x.onclick = () => onRemove(parseInt(x.dataset.i, 10)); });
+}
+
+// Renders a checklist of discovered items (pre-ticking already-selected ids) with
+// Apply / Close. onApply receives the array of checked ids.
+function showPicker(containerId, items, preselected, onApply, applyLabel) {
+  const el = $(containerId);
+  el.classList.remove("hidden");
+  if (!items.length) { el.innerHTML = `<div class="picker-empty">Nothing found.</div>`; return; }
+  const pre = new Set(preselected || []);
+  el.innerHTML =
+    items.map(it =>
+      `<label class="picker-item"><input type="checkbox" value="${escHtml(it.id)}" ${pre.has(it.id) ? "checked" : ""}><span>${escHtml(it.label)}</span></label>`).join("") +
+    `<div class="picker-actions"><button class="btn btn-sm btn-primary" data-apply>${escHtml(applyLabel || "Apply selection")}</button><button class="btn btn-sm btn-ghost" data-cancel>Close</button></div>`;
+  el.querySelector("[data-apply]").onclick = () => {
+    onApply([...el.querySelectorAll("input:checked")].map(i => i.value));
+    el.classList.add("hidden");
+  };
+  el.querySelector("[data-cancel]").onclick = () => el.classList.add("hidden");
+}
 
 // ── Page visibility reporting ─────────────────────────────────────────────
 // Tell the server when this tab is focused so it can skip external channels

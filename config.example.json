@@ -2,17 +2,24 @@
   "desktop": {
     "enabled": true
   },
-  "whatsapp": {
+  "telegram": {
     "enabled": true,
-    "phone": "+1234567890",
-    "apikey": "YOUR_CALLMEBOT_APIKEY"
+    "token": "YOUR_BOT_TOKEN",
+    "chatIds": ["123456789", "-1009876543210"]
   },
   "sms": {
     "enabled": true,
-    "accountSid": "YOUR_TWILIO_ACCOUNT_SID",
-    "authToken": "YOUR_TWILIO_AUTH_TOKEN",
-    "from": "+1YOUR_TWILIO_NUMBER",
-    "to": "+1YOUR_PERSONAL_NUMBER"
+    "accessKeyId": "YOUR_AWS_ACCESS_KEY_ID",
+    "secretAccessKey": "YOUR_AWS_SECRET_ACCESS_KEY",
+    "region": "us-east-1",
+    "originationNumber": "+1YOUR_AWS_ORIGINATION_NUMBER",
+    "to": ["+1YOUR_PERSONAL_NUMBER", "+1ANOTHER_NUMBER"]
+  },
+  "slack": {
+    "enabled": true,
+    "botToken": "xoxb-YOUR-BOT-TOKEN",
+    "channels": ["C0123456789", "C0987654321"],
+    "webhookUrl": ""
   },
   "email": {
     "enabled": true,

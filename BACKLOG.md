@@ -10,7 +10,9 @@
 
 ### 🎯 OUTSTANDING
 
-_(empty — all stories shipped)_
+| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
+|---|---|---|---|---|---|
+| 🔐 Browser-OAuth onboarding | 🟠 P1 | [#52](#52-browser-oauth-onboarding-for-remaining-providers--m--p1) (M) | proposed | | Discord/Teams OAuth doable; Telegram/AWS can't — awaiting Meni's pick. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -27,6 +29,22 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### #52 Browser-OAuth onboarding for remaining providers · M · P1 · (proposed)
+
+**Ask (Meni 2026-06-23).** "Ultimately I want the user to use the browser for auth and piggyback on that auth — best ease of use! Same for telegram/AWS/teams/discord/emails etc."
+
+**Verified feasibility (per provider — NOT all are possible):**
+- **Email (Gmail)** — ✅ DONE. Browser "Sign in with Google" OAuth (`/auth/google/*`).
+- **Slack** — ✅ DONE (#49). Browser OAuth v2; Slack's page offers "Continue with Google" (no password).
+- **Discord** — ✅ DOABLE. Discord OAuth2 with the `webhook.incoming` scope returns a channel webhook URL on Authorize ("Add to Discord" → pick channel → done). Needs a one-time Discord app (client id/secret), like Slack.
+- **Teams** — ✅ DOABLE but heavier. Microsoft identity (Azure AD) OAuth → Graph `chat/channel` post; needs an Azure app registration + permissions. (Webhook is the no-OAuth alternative.)
+- **Telegram** — ❌ NOT possible. A *send* token only comes from BotFather (manual); there is no OAuth that yields a bot token. The browser "Login Widget" returns only a user id, not a send credential. Best achievable ease already shipped: token guide + **Detect chats** auto-discovery (#47).
+- **AWS (SMS)** — ❌ NOT possible as simple OAuth. AWS auth is IAM access keys (Meni's are `AKIA…`, auto-imported #51) or IAM Identity Center SSO device-flow (only if the org uses Identity Center; his account uses IAM keys). No "click Authorize → API key."
+
+**Decision needed (Meni):** Discord + Teams are OFF in the current config. Build their OAuth now, or defer until used? (Telegram/AWS are at their ease ceiling already.)
+
+---
+
 ### #8 Telegram token replacement · XS · P3 · 🚧 SHELVED (Meni 2026-06-04)
 
 **Shelved** per Meni — not active. Live token `8755252698:…` is revoked (`getMe`→`401`, verified). When resumed: replace `telegram.token` in `~/.notify-mcp/config.json` + `notify-secrets.json` with a fresh BotFather token; `chatId 8596060260` stays.
@@ -34,6 +52,82 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-24 01:51 — SMS E.164 normalization fix + Slack private-channel clarity
+
+**SMS bug (Meni live: `Test failed: … +1 408 981 2202: parameter null/empty/invalid: destinationPhoneNumber`).** AWS `SendTextMessage` requires E.164 — the user-entered number had spaces. **Fixed:** new `e164()` helper ([ui/server.ts](ui/server.ts)) strips everything but digits/`+`; applied to `DestinationPhoneNumber` + `OriginationIdentity` in the SMS test route, the notify sender, and [src/channels/sms.ts](src/channels/sms.ts). UI also normalizes on add + on load ([ui/public/app.js](ui/public/app.js) `addSmsNumber`/populate). **Verify:** `"+1 408 981 2202"` → `"+14089812202"`; `node --test` 22/22. **Disclosed:** the actual delivery is Meni clicking **Test** again (sends a real SMS to his number — I won't).
+
+**Slack "channels are nothing like my workspace" (Meni live).** His real channels (`trade`, `vsc-notif`) are **private** (🔒); Slack hides private channels — and even their names (`conversations.info`/`users.conversations` → `missing_scope`, verified live) — without `groups:read`, which the token lacks. So Load-channels could only show the 2 public channels he doesn't use. **Fixed (clarity + path):** `/api/slack/channels` now returns `privateOmitted` ([ui/server.ts](ui/server.ts)); the picker shows a note "private channels need `groups:read` — **Connect Slack** to include them" with a link that reveals the OAuth Connect form ([ui/public/app.js](ui/public/app.js) + [style.css](ui/public/style.css) `.picker-note`). The one-click Connect already requests `groups:read,chat:write.public`, so connecting makes `trade`/`vsc-notif` list + lets the bot post without manual invites. **Verify:** `/api/slack/channels` → `privateOmitted:true`. **Disclosed:** seeing the private channels needs Meni to Connect (or add `groups:read` + reinstall) — an irreducible Slack-scope step.
+
+---
+
+### 2026-06-24 01:42 — favicon on the config page
+
+**Added** `<link rel="icon" href="assets/logo.svg" type="image/svg+xml">` to [ui/public/index.html](ui/public/index.html) (help.html already had one). The server already serves `assets/logo.svg` via `express.static`, so the config page now shows the logo in the browser tab. **Verify:** `GET /assets/logo.svg` → `200 image/svg+xml`. Static change — no relaunch (hard-refresh to bust the cached blank favicon).
+
+---
+
+### 2026-06-24 01:16 — #48 VSCode extension embeds the config UI in an activity-bar webview
+
+**Ask (Meni 2026-06-23).** Add BullseyeNotify as a VSCode extension — embedded/integrated; at minimum launch the MCP server UI, ideally open the WHOLE config inside VSC reusing the web UI as-is "like BullseyeSync"; must show up in the VSC UI. Compact for the narrow side panel. Reuse the VSC build/publish infra already in bshared.
+
+**Reworked the existing thin-shim extension** ([vscode-extension/](vscode-extension/)). It was a status-bar + external-browser shim; now it embeds the UI. [package.json](vscode-extension/package.json): adds an activity-bar `viewsContainers` + a `views` webview (`omniNotify.configView`) + view/title actions; scripts use the shared infra. [extension.js](vscode-extension/extension.js): a `WebviewViewProvider` renders an `<iframe>` → `http://localhost:<port>/` (reuses the live config UI as-is) with a CSP that frames localhost; `ensureServer()` probes `/v1/health` and spawns the server if down (`ENABLE_MCP=1` + `NOTIFY_MCP_NO_OPEN=1` so it doesn't pop an external browser), preferring the repo's `dist/ui/server.js` then `npx omni-notify-ui`; a loading state offers Start/Open-in-browser; status-bar bell + commands (refresh, open-in-browser, start, help, configure-Claude) kept. Never kills the shared server on deactivate.
+
+**Compact panel** — handled in #47's responsive CSS ([ui/public/style.css](ui/public/style.css) `@media (max-width:620px)`): the embedded UI collapses to a single scrolling column at the narrow webview width.
+
+**Shared build/publish infra reused** (not re-implemented): thin shims [vscode-extension/scripts/install-everywhere.sh](vscode-extension/scripts/install-everywhere.sh) + [vscode-extension/release.sh](vscode-extension/release.sh) delegate to `BullseyeShared/scripts/vscode-extension/{install-everywhere,release}.sh` (same pattern as BullseyeSync); `npm run package` → vsce + the postpackage install-everywhere shim. Added [media/activitybar-icon.svg](vscode-extension/media/activitybar-icon.svg) (bell), `.secrets.example`, updated `.vscodeignore`.
+
+**Verify (verified + disclosed).** `npx @vscode/vsce package --no-dependencies` → **packaged `omni-notify-mcp-menihillel-1.4.0.vsix`** (10 files, 592 KB) — includes extension.js + the webview-contributing package.json + media icon; scripts/release.sh/secrets correctly excluded. The iframe target (`:3737` config UI) is verified serving. **Disclosed (irreducible):** seeing the panel render needs install + Reload Window — run `npm run package` in [vscode-extension/](vscode-extension/) (auto-installs into every VS Code variant via the shared shim) then Ctrl+Shift+P → Developer: Reload Window; the BullseyeNotify bell appears in the activity bar. (Did NOT auto-install to avoid disrupting your running editors — say the word and I'll run it.)
+
+---
+
+### 2026-06-24 01:12 — #51 auto-import creds from secrets + stop browser-pop on relaunch
+
+**Ask (Meni 2026-06-23).** "Configure my env to just work as if I went through the UI — I already have the conf in bshare, copy those over. Make it brainless for any user." + "STOP relaunching the UI [popping the browser] every time you restart the server."
+
+**Auto-import** ([ui/server.ts](ui/server.ts) `importCredsOnStart`, called at startup). Decodes `notify-secrets.json` (via existing `loadSecrets`/`decodeB64Fields`) and copies creds into config.json's EMPTY fields only (never clobbers user edits, idempotent): telegram token + `chatId`→`chatIds[]`, email host/user/pass/to, slack botToken/webhookUrl + `channelId`→`channels[]`, ntfy token/topic, and **AWS SMS** accessKeyId/secretAccessKey/region/originationNumber (+ auto-enables SMS when creds present). Seeded the AWS creds into [notify-secrets.json](notify-secrets.json) `sms` (base64 secret) so the import is the single generic source — any user with the secrets file gets every channel pre-wired.
+
+**Browser-pop fix** ([ui/server.ts](ui/server.ts) listen callback). The server called `open()` on EVERY start. Now it auto-opens ONLY on genuine first run (`!existsSync(CONFIG_PATH)`), and `NOTIFY_MCP_NO_OPEN=1` / `BROWSER=none` force-suppress. Restarts no longer pop the UI.
+
+**Verify (verified live).** Relaunch log shows `[import] imported credentials from notify-secrets.json into config.json`; `/api/config` → sms `{enabled:true, accessKeyId:AKIA…, region:us-east-1, originationNumber:+1877…, secret masked}`. No browser opened on relaunch. `node --test` → 22/22.
+
+---
+
+### 2026-06-24 01:12 — #50 SMS via AWS End User Messaging (replaces Twilio)
+
+**Ask (Meni 2026-06-23).** "Reimplement SMS to use AWS not Twilio — I already have auth in bshared."
+
+**Found** the AWS creds in BullseyeAces `src/main/resources/application.properties` (`app.aws.*` + End User Messaging toll-free origination `+18775194697`). Swapped dep `twilio` → `@aws-sdk/client-pinpoint-sms-voice-v2` ([package.json](package.json), `npm install` pruned twilio). Model `sms` is now `{accessKeyId, secretAccessKey, region, originationNumber, to[]}` ([src/config.ts](src/config.ts), [ui/messaging/types.ts](ui/messaging/types.ts)); `normalizeConfig` strips legacy Twilio fields + defaults region. Sender ([src/channels/sms.ts](src/channels/sms.ts) + [ui/server.ts](ui/server.ts) sender/test route) uses `SendTextMessageCommand` (OriginationIdentity + DestinationPhoneNumber) fanned over `to[]`. Discovery `GET /api/sms/numbers` now lists AWS origination numbers (`DescribePhoneNumbers`) + sandbox verified destinations (`DescribeVerifiedDestinationNumbers`). UI SMS card ([ui/public/index.html](ui/public/index.html)+[app.js](ui/public/app.js)) → Access Key ID / Secret / Region / origination (Discover) + recipient chips.
+
+**Verify (verified live + disclosed).** AWS creds proven valid: `GET /api/sms/numbers` made a real authenticated `DescribePhoneNumbers` call → returned origination `+18773527913`. `npm run build` EXIT 0; `node --test` → 22/22 (test #21 now asserts Twilio fields stripped + region default; #22 round-trips the AWS shape). **Disclosed (irreducible):** an actual SMS delivery needs a recipient in `to[]` + Meni clicking Test (sending unsolicited test texts isn't appropriate) — the credential/origination path is verified; the send is one click away.
+
+---
+
+### 2026-06-24 01:12 — #49 Slack: reuse configured token + one-click OAuth
+
+**Ask (Meni 2026-06-23, multiple).** "Slack is already configured on bshared — why do I need anything? Where's the xoxb token?? Make auth brainless — login + click Authenticate." Plus a blue-on-green contrast bug.
+
+**Fixed.** (a) **Reuse the bus token** — `/api/slack/channels`, the notify sender, test route, and `enableSlack` all fall back to `slackCreds().token` (the notify-secrets.json bot token) when config has none; new `/api/slack/status` reports it's already configured + offers the bus channel `C0B1W7NKKFS` as one-click add. (b) **Load-channels bug** — was requesting `private_channel` (needs `groups:read`, which the token lacks) → Slack failed the whole call; now tries public+private and falls back to public-only → returns `#all-alphawave`, `#social` with zero new config. (c) **Contrast** — replaced the unreadable blue inline link on the green banner with a real button. (d) **One-click OAuth** ([ui/server.ts](ui/server.ts) `/auth/slack/start` + `/auth/slack/callback`, mirrors Gmail OAuth): paste Client ID/Secret (from Basic Information) + register the redirect URL once → Connect → Authorize in browser → bot token WITH scopes (`channels:read,groups:read,chat:write,chat:write.public`) captured automatically. UI: Connect/Reconnect/Disconnect + connected-team banner ([ui/public/index.html](ui/public/index.html)+[app.js](ui/public/app.js)).
+
+**Verify (verified live).** `auth.test` confirmed the existing token's scopes (`channels:read,chat:write,…`); `/api/slack/channels` returns the 2 public channels live; `/api/slack/status` → `{botTokenConfigured:true, source:"bus", busChannel:"C0B1W7NKKFS"}`. OAuth endpoints wired (`/auth/slack/start` redirects to slack.com authorize). `node --test` → 22/22.
+
+**Addendum (2026-06-24 01:24).** Meni uses Google-SSO for Slack (no password) and was being pushed toward a needless login. Fixed: when a working token already exists, the entire Connect/OAuth setup section is hidden ([ui/public/app.js](ui/public/app.js) `refreshSlackTokenStatus` toggles `#slack-oauth`) — a configured Slack shows zero login prompt, just "✓ Slack is already configured — pick channels below"; Disconnect kept reachable in the banner for OAuth-connected workspaces. The Connect form (with "Continue with Google" on Slack's page) only appears when nothing is configured. Static UI change — no relaunch.
+
+---
+
+### 2026-06-24 00:34 — #47 multi-destination per provider (SMS/Slack/Telegram fan-out)
+
+**Ask (Meni 2026-06-23).** Many destinations per provider — SMS → many numbers, Slack → many channels, Telegram → many chats. Change model/config + UI; ease config "as much as possible — point and click, list selection, check lists"; "read as much info through APIs and offer point and click based on what we discover, but be efficient."
+
+**Model (rip-and-replace, forward-migrated).** `telegram.chatId:string`→`chatIds:string[]`; `sms.to:string`→`to:string[]`; `slack` gains `botToken?` + `channels:string[]` (webhook kept as single-channel fallback + the inbound bus reply). Interfaces updated in [src/config.ts](src/config.ts) + [ui/messaging/types.ts](ui/messaging/types.ts); legacy senders in [src/channels/{telegram,sms,slack}.ts](src/channels/) loop the arrays. New `normalizeConfig()` in [ui/server.ts](ui/server.ts) `loadConfig` migrates old singular fields on load (verified live: real config's `chatId "8596060260"` → `chatIds:["8596060260"]`). [config.example.json](config.example.json) updated to arrays.
+
+**Dispatch ([ui/server.ts](ui/server.ts) `sendNotification`).** telegram/sms/slack senders fan out over their arrays — send-all, count delivered if any succeed, throw aggregated only if all fail. Telegram listener matches inbound from ANY configured chat + acks to the originating `msg.chat.id` (new `lastUserChatId`; reply_to only in that chat); `ask` tool messages every chat. Slack: `botToken`+`channels` → `chat.postMessage` per channel, else webhook. `enableX` gates now require ≥1 destination. `maskSecrets`/`mergePreservingSecrets` mask + guard the new `slack.botToken`.
+
+**Point-and-click discovery (per Meni's API-discovery ask).** New endpoints: `GET /api/telegram/chats` (getUpdates → every distinct chat w/ display name), `GET /api/slack/channels` (conversations.list w/ pagination, flags `invite bot`), `GET /api/sms/numbers` (Twilio IncomingPhoneNumbers → From datalist + OutgoingCallerIds → verified-recipient checklist). UI ([ui/public/index.html](ui/public/index.html) + [app.js](ui/public/app.js)): removable **chips** for chats/numbers/channels; **checklist pickers** populated from the discovery endpoints; Detect chats / Load channels / Discover buttons; webhook kept under a fold. Reusable `renderChips`/`showPicker`/`withButton` helpers; name caches keep friendly labels across config reloads. [style.css](ui/public/style.css) gains chip/picker styles.
+
+**Verify (verified).** `npm run build` EXIT 0; `node --test` → **22/22 pass** incl. 2 new integration tests ([tests/smoke.test.mjs](tests/smoke.test.mjs)): #21 legacy `chatId`/`to` migrate to arrays on load; #22 arrays round-trip through save + `slack.botToken` masks in GET and survives a masked-sentinel re-save (secret guard) while channels still update. Live server (`:3737`, `ENABLE_MCP=1`): `/api/config` shows migrated arrays + masked botToken; discovery endpoints wired (`slack/channels`,`sms/numbers`→400 w/o creds; `telegram/chats`→500 = the revoked #8 token surfacing through getUpdates, i.e. it used the saved token). `node --check app.js` clean. **Disclosed (irreducible live step):** real over-the-wire fan-out to multiple Telegram chats / SMS numbers / Slack channels needs live credentials (Telegram token is revoked per #8, no Twilio/Slack-bot creds in this env) — provider hosts are hardcoded so they can't be redirected to a local capture. Meni verifies: in the UI add ≥2 destinations per provider (Detect chats / Load channels / Discover) → click **Test** → confirm every destination receives the message.
 
 ---
 
