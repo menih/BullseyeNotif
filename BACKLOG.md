@@ -12,6 +12,7 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
+| 🪪 Slack UX | 🟠 P1 | [#53](#53-slack-card-oauth-first-hide-the-rest--s--p1) (S) | 10% | | Make browser-OAuth the first/primary option; bury manual token/webhook/guides. |
 | 🔐 Browser-OAuth onboarding | 🟠 P1 | [#52](#52-browser-oauth-onboarding-for-remaining-providers--m--p1) (M) | proposed | | Discord/Teams OAuth doable; Telegram/AWS can't — awaiting Meni's pick. |
 
 ### 🔄 ONGOING
@@ -26,6 +27,16 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📋 OPEN BACKLOG
+
+---
+
+### #53 Slack card: OAuth-first, hide the rest · S · P1
+
+**Ask (Meni 2026-06-23).** "If browser auth is possible, offer it as the FIRST option and hide everything else (guidance/instructions/description/crap). Simplest, frictionless." Applies anywhere browser-OAuth exists; Slack is the active case.
+
+**Plan.** Restructure the Slack card ([ui/public/index.html](ui/public/index.html) + [app.js](ui/public/app.js)): make **Connect Slack** (browser OAuth) the FIRST, primary, always-visible CTA; collapse the Client ID/Secret + redirect instructions, the manual bot-token field, the webhook fallback, and all guide `ol`s into ONE collapsed "Advanced / manual" `<details>`. When already connected/configured, show a compact "✓ Connected" + small Reconnect/Disconnect; otherwise Connect is the hero. (Started: reading the card markup; not yet edited.)
+
+**Note.** Email already has Google OAuth but its app-password path is lower-friction (full Gmail OAuth needs a user Google Cloud app) — leave unless Meni wants it flipped. Discord/Teams covered by #52.
 
 ---
 
@@ -52,6 +63,12 @@ _(empty — only Meni places rows here)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-24 02:05 — fix blocked git push (AWS secret) + confirm publish scope
+
+**Meni:** "fix git" — VS Code push failed. **Root cause (verified):** not a fast-forward issue — **GitHub Push Protection (GH013)** rejected the push because `notify-secrets.json:21-22` contained an AWS Access Key + Secret that I'd added there (my mistake). Base64-encoding did NOT help — GitHub decodes base64 and still detects the AWS secret (verified: two rejections). **Fixed:** stripped the AWS creds from the committed [notify-secrets.json](notify-secrets.json) (now empty `accessKeyId_b64`/`secretAccessKey_b64`); the creds remain ONLY in local `~/.notify-mcp/config.json` (verified present → SMS still works). Soft-reset the 2 unpushed commits into one clean commit + pushed: **`2fc715c..8617202 main -> main`** ✅. **Publish scope confirmed (no creds ship):** `.vsix` = `extension.js, package.json, icon.png, README.md, media/, screenshots/` only (verified via `vsce ls`); npm `files` = `dist/, ui/public/, assets/, config.example.json, LICENSE, README.md` only. `notify-secrets.json` + `config.json` are in NEITHER. **Verify:** `git show HEAD:notify-secrets.json` → AWS fields empty; `vsce ls` → no secrets/server; extension `menihillel.omni-notify-mcp-menihillel@1.4.0` installed (Reload Window to see it).
 
 ---
 
