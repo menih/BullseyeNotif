@@ -12,7 +12,7 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 🔕 Quiet control | 🟠 P1 | [#56](#56-global-disable-all-clients--kill-switch--dnd-not-suppressing--m--p1) (M) | — | | DND on but clients still active; need a master disable-all that the extension reflects. |
+| 🔕 Quiet control | 🟠 P1 | [#57](#57-per-client-disable-server--client-side--m--p1) (M) | — | 🚧 Meni: confirm client-side scope | Per-client disable: toggle a single client off (server UI + the client honors it). |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -26,15 +26,15 @@ _(empty — only Meni places rows here)_
 
 ---
 
-### #56 GLOBAL DISABLE-ALL-CLIENTS / KILL-SWITCH + DND NOT SUPPRESSING · M · P1
+### #57 PER-CLIENT DISABLE (server + client side) · M · P1
 
-**Ask (Meni 2026-06-25, angry).** "There has to be a way to disable all clients!!! and notify the extension to disable everything!!! I turned on DND but shit keeps on happening on clients."
+**Ask (Meni 2026-06-25).** "When user turn on DND, do we ask clients to stop sending? There has to be a way we can disable individual clients, both from server and client perspective."
 
-**Two parts.**
-1. **Bug:** DND is ON but notifications/activity still reach clients → DND gating is leaky or not applied to every send path. Need to repro: which path bypasses the DND check (notify vs ask vs per-client vs test sends).
-2. **Feature:** a master **disable-all** switch (kill switch) that hard-silences EVERY client + channel, and is pushed to the extension panel so it visibly reflects the off state.
+**Current reality (verified).** No server→client push. Pull-based only: agents poll `get_dnd_status`/`get_idle_seconds` and self-censor; server suppresses at delivery (DND for <high; muteAll for all). No per-client enable/disable exists — `muteAll` is global. Clients ARE tracked per window (`sessions[sid] = {clientId, tag, hostSessionId}`; [/api/clients](ui/server.ts#L1181)), and `sendNotification(msg, prio, clientId)` already receives the originating client → per-client suppression is feasible.
 
-**Investigate:** DND/idle gating in [ui/server.ts](ui/server.ts) + the MCP `notify`/`ask` paths ([src/](src/)); where `get_dnd_status` is consulted vs ignored; whether per-client enable state exists. **Acceptance:** with disable-all on, no notification of any kind is delivered on any channel/client, and the panel shows it.
+**Design (grounded in the code).** Mirror the existing `clientAliases` rename pattern ([ui/server.ts](ui/server.ts#L1270)): a per-client `disabledClients` set in config keyed by clientId/tag. (a) Suppress in `sendNotification` when the originating client is disabled. (b) `get_dnd_status` returns `disabled` for that specific client so its agent stops. (c) Toggle in the Clients panel (server side). (d) Optional: a self-mute control in the client's own extension panel (client side).
+
+**Pending Meni decision (options-prompt):** scope of "client perspective" — agent-honors-disable + server backstop, vs ALSO a per-window self-mute in the extension. Build follows the answer.
 
 ---
 
@@ -43,6 +43,34 @@ _(empty — all stories shipped)_
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-25 16:18 — #56 master "Disable all" kill switch + fix DND high-priority leak
+
+**Ask (Meni 2026-06-25, angry).** "There has to be a way to disable all clients!!! and notify the extension to disable everything!!! I turned on DND but shit keeps on happening on clients."
+
+**Root cause of the leak** ([ui/messaging/notificationEngine.ts:38](ui/messaging/notificationEngine.ts#L38)): `computeDesktopOnlyMode` returns early for `priority === "high"` BEFORE the DND check — by design DND only suppresses priority < high. So agents sending `notify(priority:"high")` blew through DND. That's why "shit keeps happening" despite DND on.
+
+**Fix — a master kill switch (hard mute), separate from DND so DND keeps its high-priority escape hatch:**
+- **Single chokepoint** ([ui/server.ts](ui/server.ts) `sendNotification`): when `cfg.muteAll === true`, return immediately — suppresses EVERY priority (incl. high), EVERY channel, EVERY client (all notifies funnel through here: the `notify` MCP tool + `/api/agent/notify` HTTP + internal). New top-level config `muteAll` (default false) in `defaultConfig` + preserved through `mergePreservingSecrets`.
+- **Endpoints** ([ui/server.ts](ui/server.ts)): `GET /api/mute` → `{muted}`; `POST /api/mute {muted}` → flips it + logs.
+- **Agents back off** ([ui/server.ts](ui/server.ts) `get_dnd_status`): now reports `{active:true, reason:"disabled"}` when muted, so polling agents skip notifying entirely.
+- **UI** ([ui/public/index.html](ui/public/index.html) + [app.js](ui/public/app.js) `saveMuteAll`/`applyMuteState` + [style.css](ui/public/style.css) `.mute-all-bar`): a prominent red "Disable all notifications" master toggle pinned at the top of the config panel; when on it turns red, rewrites the sub-line to "ALL NOTIFICATIONS DISABLED…", and dims the channel panel.
+- **Extension** ([vscode-extension/extension.js](vscode-extension/extension.js) `refreshStatus`/`fetchMuted`): status-bar bell polls `/api/mute` (10s) → shows `$(bell-slash) Muted` with a warning background + tooltip when muted. The embedded panel already shows the toggle (it iframes the web UI).
+
+**Verify (verified live).** Isolated server (`NOTIFY_MCP_CONFIG_DIR` sandbox, port 3939, all channels off):
+| Step | Command | Observed |
+|---|---|---|
+| mute round-trip | `POST /api/mute {muted:true}` → `GET /api/config` | `{ok:true,muted:true}`; `muteAll = true` |
+| **HIGH suppressed** | `POST /api/agent/notify {priority:"high"}` | `"Suppressed — all notifications are disabled (master mute is ON)."` |
+| normal suppressed | `POST /api/agent/notify {priority:"normal"}` | same suppressed string |
+| unmuted passes | `POST /api/mute {muted:false}` → notify normal | `"No channels delivered"` (gate released) |
+| server log | — | `· [notify] suppressed — all notifications disabled (master mute), priority=high` |
+
+`npm run build` clean (tsc ×2); `node --test` → **22/22**; `node --check` app.js + extension.js OK.
+
+**Operator-verify (irreducible — restart your live bus).** The server-side mute + `/api/mute` need the new `dist/` — your running notify server on :3737 is the old build, so I did NOT kill it (your MCP bridge + windows depend on it). To activate: restart the notify server (`./restart.sh`, or close/reopen so the extension re-spawns it). The static UI (toggle bar) shows on a hard-refresh, but toggling only persists once the new server is running. Then: flip "Disable all notifications" → it goes red, the extension bell shows "Muted", and no notif of any priority is delivered until you flip it back.
 
 ---
 
