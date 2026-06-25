@@ -287,7 +287,7 @@
           <div id="discord-status" class="ok-banner hidden" style="margin-bottom:4px"></div>
           <!-- PRIMARY: one-click browser sign-in — pick a server+channel, webhook captured -->
           <div class="fg" id="discord-oauth">
-            <a class="btn btn-primary" id="discord-connect-btn" href="/auth/discord/start">🔗 Connect Discord (browser sign-in)</a>
+            <a class="btn btn-primary" id="discord-connect-btn" href="/auth/discord/start" target="_blank" rel="noopener">🔗 Connect Discord (browser sign-in)</a>
             <button class="btn btn-sm btn-danger hidden" id="discord-disconnect-btn" onclick="disconnectDiscord()">Disconnect</button>
             <span class="hint">One click — authorize, pick a server + channel, the webhook is captured automatically. First time only: add your Discord app's Client ID/Secret under <b>Advanced</b>.</span>
           </div>
@@ -331,7 +331,7 @@
           <div id="slack-token-status" class="ok-banner hidden" style="margin-bottom:4px"></div>
           <!-- PRIMARY: one-click browser sign-in (the recommended, frictionless path) -->
           <div class="fg" id="slack-oauth">
-            <a class="btn btn-primary" id="slack-connect-btn" href="/auth/slack/start">🔗 Connect Slack (browser sign-in)</a>
+            <a class="btn btn-primary" id="slack-connect-btn" href="/auth/slack/start" target="_blank" rel="noopener">🔗 Connect Slack (browser sign-in)</a>
             <button class="btn btn-sm btn-danger hidden" id="slack-disconnect-btn" onclick="disconnectSlack()">Disconnect</button>
             <span class="hint">One click — authorize in your browser, no tokens to copy. First time only: add your Slack app's Client ID/Secret under <b>Advanced</b>.</span>
           </div>

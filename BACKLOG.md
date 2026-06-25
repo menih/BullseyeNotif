@@ -32,9 +32,17 @@ _(empty — all stories shipped)_
 
 ---
 
+### 2026-06-24 08:34 — OAuth Connect opens externally (fixes embedded-panel crash)
+
+**Bug (Meni 2026-06-23).** Clicking Connect/Reconnect in the embedded VS Code panel crashed the webui; in a full browser it navigated away to Slack. Cause: the Connect `<a href="/auth/slack/start">` navigated the panel's **iframe**, which 302s to `slack.com` — but the extension webview's CSP only allows `frame-src` localhost, so framing slack.com is blocked → the iframe breaks.
+
+**Fixed** ([ui/public/index.html](ui/public/index.html)): added `target="_blank" rel="noopener"` to the Slack + Discord Connect links, so the OAuth flow opens in a NEW/external window (VS Code routes webview popups to the system browser) instead of navigating the embedded iframe. Panel stays intact; OAuth runs in the real browser. Static change — hard-refresh. **Note:** the Slack `redirect_uri did not match` error is separate + Slack-side — register `http://localhost:3737/auth/slack/callback` in the app's OAuth & Permissions → Redirect URLs.
+
+---
+
 ### 2026-06-24 08:15 — collapsible activity-log section (collapsed by default) + Slack OAuth creds pre-filled
 
-**Log collapse (Meni 2026-06-23).** Activity-log section is now collapse/expand, **collapsed by default**. Added a chevron toggle in the log header ([ui/public/index.html](ui/public/index.html) `.log-collapse`), `toggleLog()` ([ui/public/app.js](ui/public/app.js)), and CSS ([ui/public/style.css](ui/public/style.css)): `.log-section.collapsed` hides the log/clients panels + rotates the chevron; `main:has(.log-section.collapsed) .config-panel` grows to reclaim the space. Static change — hard-refresh. **Verify:** `node --check app.js` OK.
+**Log collapse (Meni 2026-06-23).** Activity-log section is now collapse/expand, **collapsed by default**. Added a chevron toggle in the log header ([ui/public/index.html](ui/public/index.html) `.log-collapse`), `toggleLog()` ([ui/public/app.js](ui/public/app.js)), and CSS ([ui/public/style.css](ui/public/style.css)): `.log-section.collapsed` hides the log/clients panels + rotates the chevron; `main:has(.log-section.collapsed) .config-panel` grows to reclaim the space. Static change — hard-refresh. **Verify:** `node --check app.js` OK. **Bugfix (same turn):** first version used `height:auto` on the grown config-panel, which broke the `height:100%` chain on `.section`/`.card-list` and collapsed all cards to 0 height (Meni: "whole config panel empty"). Fixed → `flex: 1 1 auto` only (keeps the 62% height as flex-basis so the chain resolves); server verified alive (not a crash).
 
 **Slack OAuth unblock (Meni 2026-06-23).** "Cannot reconnect" was the OAuth Connect gated on a missing Client ID/Secret. Pre-filled `slack.clientId`/`slack.clientSecret` (from Meni's Basic Information page) into local config (config.json — never shipped). **Verify:** `/auth/slack/start` → `302 https://slack.com/oauth/v2/authorize?...scope=channels:read,groups:read,chat:write,chat:write.public` (Connect now works). **Operator step (irreducible):** register redirect `http://localhost:3737/auth/slack/callback` in the Slack app (OAuth & Permissions → Redirect URLs) → click Connect → Allow → then private channels `trade`/`vsc-notif` list (groups:read granted).
 

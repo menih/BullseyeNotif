@@ -205,8 +205,10 @@ main {
 .log-section.collapsed .log-header { border-bottom: none; }
 .log-section.collapsed .log-panel,
 .log-section.collapsed .clients-panel { display: none !important; }
-/* When the log is collapsed, let the config panel take the freed space. */
-main:has(.log-section.collapsed) .config-panel { height: auto; flex: 1 1 auto; }
+/* When the log is collapsed, let the config panel grow into the freed space.
+   Keep flex-basis = its 62% height so the height:100% chain on .section /
+   .card-list stays resolvable (height:auto here collapsed the cards to 0). */
+main:has(.log-section.collapsed) .config-panel { flex: 1 1 auto; }
 
 .log-title {
   display: flex;
