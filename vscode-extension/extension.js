@@ -210,11 +210,37 @@ function startServerProc() {
   try { uiProcess.unref(); } catch { /* detached cleanup best-effort */ }
 }
 
+function fetchMuted() {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: "127.0.0.1", port: uiPort(), path: "/api/mute", timeout: 900 },
+      (res) => {
+        let body = "";
+        res.on("data", (d) => { body += d; });
+        res.on("end", () => { try { resolve(JSON.parse(body).muted === true); } catch { resolve(false); } });
+      }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+  });
+}
+
 async function refreshStatus() {
   if (!statusBarItem) return;
   const up = await pingUi();
-  statusBarItem.text = up ? "$(bell) Notify" : "$(bell-slash) Notify";
-  statusBarItem.backgroundColor = up ? undefined : new vscode.ThemeColor("statusBarItem.warningBackground");
+  if (!up) {
+    statusBarItem.text = "$(bell-slash) Notify";
+    statusBarItem.tooltip = "BullseyeNotify config server is not running — click to open panel";
+    statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+    statusBarItem.show();
+    return;
+  }
+  const muted = await fetchMuted();
+  statusBarItem.text = muted ? "$(bell-slash) Muted" : "$(bell) Notify";
+  statusBarItem.tooltip = muted
+    ? "All notifications are DISABLED (master mute is ON) — click to open panel"
+    : "Open BullseyeNotify config panel";
+  statusBarItem.backgroundColor = muted ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
   statusBarItem.show();
 }
 

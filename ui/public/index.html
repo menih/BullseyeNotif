@@ -20,6 +20,19 @@
   </header>
 
   <main>
+    <div class="mute-all-bar" id="mute-all-bar">
+      <div class="mute-all-main">
+        <span class="mute-all-icon">🔕</span>
+        <div class="mute-all-text">
+          <span class="mute-all-title">Disable all notifications</span>
+          <span class="mute-all-sub" id="mute-all-sub">Master kill switch — silences every channel &amp; client, including high-priority. Overrides DND.</span>
+        </div>
+      </div>
+      <label class="toggle-wrap">
+        <input type="checkbox" id="mute-all" onchange="saveMuteAll()">
+        <span class="toggle"></span>
+      </label>
+    </div>
     <div class="config-panel">
     <section class="section section-channels">
       <div class="section-hd">

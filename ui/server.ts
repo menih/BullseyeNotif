@@ -38,6 +38,7 @@ const ENABLE_MCP = (process.env.ENABLE_MCP ?? "").trim() === "1";
 
 function defaultConfig() {
   return {
+    muteAll: false,
     desktop: { enabled: false, sound: true },
     telegram: { enabled: false, token: "", chatIds: [] },
     whatsapp: { enabled: false, instanceId: "", apiToken: "", phone: "" },
@@ -178,6 +179,7 @@ function mergePreservingSecrets(
   if (update.dnd?.schedule) {
     merged.dnd.schedule = { ...(merged.dnd.schedule || {}), ...update.dnd.schedule };
   }
+  if (typeof update.muteAll === "boolean") merged.muteAll = update.muteAll;
   const guard = (path: [string, string]) => {
     const [sec, field] = path;
     if (update[sec]?.[field] === MASKED) {
@@ -383,6 +385,19 @@ app.post("/api/config", (req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+});
+
+app.get("/api/mute", (_req, res) => {
+  res.json({ muted: loadConfig().muteAll === true });
+});
+
+app.post("/api/mute", (req, res) => {
+  const muted = req.body?.muted === true;
+  const cfg = loadConfig();
+  cfg.muteAll = muted;
+  saveConfig(cfg);
+  log("·", "mute", muted ? "ALL notifications disabled (master mute ON)" : "master mute OFF");
+  res.json({ ok: true, muted });
 });
 
 // ── Per-window workspace registry ───────────────────────────────────────────
@@ -1325,6 +1340,10 @@ app.get("/api/logs", (req, res) => {
 
 async function sendNotification(message: string, priority: "low" | "normal" | "high", client?: string) {
   const cfg = loadConfig();
+  if (cfg.muteAll === true) {
+    log("·", "notify", `suppressed — all notifications disabled (master mute), priority=${priority}`, client);
+    return "Suppressed — all notifications are disabled (master mute is ON).";
+  }
   const inTelegramConvo = Date.now() - lastTelegramInboundAt < TELEGRAM_CONVO_TTL_MS;
   const idleSecs = getOsIdleSeconds();
 
@@ -2743,18 +2762,19 @@ function createMcpServer(clientId: string, sessionTag?: string) {
 
   server.tool(
     "get_dnd_status",
-    "Returns the current DND state: " +
-      "{ active: boolean, reason: 'manual' | 'schedule' | 'off' }. " +
-      "When active, the server will suppress delivery for priority < high. " +
-      "Also drains pending inbox messages — safe to use as a heartbeat.",
+    "Returns the current quiet state: " +
+      "{ active: boolean, reason: 'disabled' | 'manual' | 'schedule' | 'off' }. " +
+      "reason='disabled' means the master kill switch is ON — ALL notifications are suppressed " +
+      "regardless of priority (do not notify at all). Otherwise 'manual'/'schedule' DND suppresses " +
+      "delivery for priority < high. Also drains pending inbox messages — safe to use as a heartbeat.",
     {},
     async () => {
       const cfg = loadConfig();
-      const active = isDndActive(cfg);
+      const muted = cfg.muteAll === true;
+      const active = muted || isDndActive(cfg);
       let reason = "off";
-      if (active) {
-        reason = cfg.dnd?.enabled ? "manual" : "schedule";
-      }
+      if (muted) reason = "disabled";
+      else if (active) reason = cfg.dnd?.enabled ? "manual" : "schedule";
       return {
         content: [{ type: "text" as const, text: appendInbox(JSON.stringify({ active, reason }), sessionTag, clientId) }],
       };

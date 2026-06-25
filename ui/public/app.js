@@ -141,6 +141,11 @@ function populateForm() {
   $("teams-enabled").checked = !!tm.enabled;
   $("teams-webhook").value = tm.webhookUrl ?? "";
 
+  // Master mute (kill switch)
+  const muted = !!config.muteAll;
+  $("mute-all").checked = muted;
+  applyMuteState(muted);
+
   // DND
   const dnd = config.dnd ?? {};
   $("dnd-enabled").checked = !!dnd.enabled;
@@ -351,6 +356,23 @@ async function detectTelegramChats() {
       saveTelegram();
     });
   }, "Detecting…");
+}
+
+function applyMuteState(muted) {
+  const bar = $("mute-all-bar");
+  const sub = $("mute-all-sub");
+  if (bar) bar.classList.toggle("muted", muted);
+  const body = document.body;
+  if (body) body.classList.toggle("all-muted", muted);
+  if (sub) sub.textContent = muted
+    ? "ALL NOTIFICATIONS DISABLED — nothing is delivered on any channel or client, even high-priority."
+    : "Master kill switch — silences every channel & client, including high-priority. Overrides DND.";
+}
+
+async function saveMuteAll() {
+  const muted = $("mute-all").checked;
+  applyMuteState(muted);
+  await patch({ muteAll: muted });
 }
 
 async function saveDnd() {
