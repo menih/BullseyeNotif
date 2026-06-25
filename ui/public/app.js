@@ -1125,15 +1125,20 @@ async function refreshClients() {
       const where = [aliased ? c.tag : null, c.workspaceName || c.clientName, c.host].filter(Boolean).join(" · ");
       const refArg = ref.replace(/'/g, "\\'");
       const labelArg = label.replace(/'/g, "\\'");
+      const idArg = String(c.id).replace(/'/g, "\\'");
       const panelBtn = (c.panelCount > 1 && c.sessionId)
         ? `<button class="btn btn-sm btn-ghost" onclick="invalidatePanel('${refArg}','${c.sessionId}')">Invalidate panel</button>`
         : "";
-      return `<div class="client-row">
+      const disabledChip = c.disabled ? `<span class="client-kind client-kind-off">disabled</span>` : "";
+      const disableBtn = `<button class="btn btn-sm ${c.disabled ? "btn-warn" : "btn-ghost"}" onclick="toggleClientDisabled('${idArg}', ${c.disabled ? "true" : "false"})">${c.disabled ? "Enable" : "Disable"}</button>`;
+      return `<div class="client-row${c.disabled ? " client-row-off" : ""}">
         <span class="pill-dot pill-dot-${status}"></span>
         <span class="client-tag" style="color:${clientColor(ref)}" title="${escHtml(ref)}">${escHtml(label)}</span>
+        ${disabledChip}
         ${panelBadge}
         <span class="client-kinds">${kinds}</span>
         <span class="client-actions">
+          ${disableBtn}
           <button class="btn btn-sm btn-ghost" onclick="renameClient('${refArg}','${labelArg}')">Rename</button>
           <button class="btn btn-sm btn-ghost" onclick="reconnectClient('${refArg}')">Invalidate</button>
           ${panelBtn}
@@ -1176,6 +1181,20 @@ async function invalidatePanel(tag, sessionId) {
     toast(`Invalidated panel ${sessionId} — ${closed} session(s) dropped`);
   } catch { toast("Invalidate panel failed", "error"); }
   setTimeout(refreshClients, 1000);
+}
+
+async function toggleClientDisabled(id, currentlyDisabled) {
+  const disabled = !currentlyDisabled;
+  try {
+    const res = await fetch(`/api/clients/${encodeURIComponent(id)}/disable`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ disabled }),
+    });
+    const json = await res.json();
+    toast(`Client ${json.disabled ? "disabled" : "enabled"}`);
+  } catch { toast("Toggle failed", "error"); }
+  refreshClients();
 }
 
 setInterval(refreshClients, 3000);

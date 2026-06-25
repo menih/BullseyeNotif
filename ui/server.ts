@@ -39,6 +39,7 @@ const ENABLE_MCP = (process.env.ENABLE_MCP ?? "").trim() === "1";
 function defaultConfig() {
   return {
     muteAll: false,
+    disabledClients: [] as string[],
     desktop: { enabled: false, sound: true },
     telegram: { enabled: false, token: "", chatIds: [] },
     whatsapp: { enabled: false, instanceId: "", apiToken: "", phone: "" },
@@ -1181,6 +1182,7 @@ app.delete("/api/sessions/:clientId", (_req, res) => {
 app.get("/api/clients", (_req, res) => {
   pruneDeadSessions();
   const now = Date.now();
+  const disabledSet = new Set(Array.isArray(loadConfig().disabledClients) ? loadConfig().disabledClients : []);
   const isBot = (t?: string) => !!t && t.endsWith("-bot");
   const allActive = Object.entries(sessions)
     .map(([sid, s]) => ({ sid, ...s }))
@@ -1229,6 +1231,7 @@ app.get("/api/clients", (_req, res) => {
       host: s.host,
       workspaceName: regWs || s.workspaceName,
       clientName: s.clientName,
+      disabled: disabledSet.has(s.clientId),
     };
   });
   const tagsWithSession = new Set(active.map(s => s.tag).filter(Boolean) as string[]);
@@ -1277,6 +1280,45 @@ app.post("/api/clients/:tag/rename", (req, res) => {
   saveConfig(cfg);
   log("·", "clients", `rename ${tag} → ${name || "(cleared)"}`);
   res.json({ ok: true, tag, name: name || null });
+});
+
+// Disable/enable a single client (keyed by clientId — the same id sendNotification
+// receives). A disabled client is suppressed at the chokepoint AND told via
+// get_dnd_status (reason='disabled') so its agent stops sending.
+app.post("/api/clients/:id/disable", (req, res) => {
+  const id = String(req.params.id);
+  const disabled = req.body?.disabled === true;
+  const cfg = loadConfig();
+  const set = new Set(Array.isArray(cfg.disabledClients) ? cfg.disabledClients : []);
+  if (disabled) set.add(id); else set.delete(id);
+  cfg.disabledClients = [...set];
+  saveConfig(cfg);
+  log("·", "clients", `${disabled ? "disabled" : "enabled"} client ${id}`);
+  res.json({ ok: true, id, disabled });
+});
+
+function clientIdsForHostSession(sessionId: string): string[] {
+  return Object.values(sessions).filter(s => s.hostSessionId === sessionId).map(s => s.clientId);
+}
+
+// Extension self-mute: a VS Code window mutes/unmutes ITSELF by its
+// CLAUDE_CODE_SESSION_ID (the bridge's hostSessionId), resolved to its clientId(s).
+app.get("/api/window/:sessionId/mute", (req, res) => {
+  const ids = clientIdsForHostSession(String(req.params.sessionId));
+  const disabled = new Set(Array.isArray(loadConfig().disabledClients) ? loadConfig().disabledClients : []);
+  res.json({ muted: ids.length > 0 && ids.every(id => disabled.has(id)), clientIds: ids });
+});
+
+app.post("/api/window/:sessionId/mute", (req, res) => {
+  const muted = req.body?.muted === true;
+  const ids = clientIdsForHostSession(String(req.params.sessionId));
+  const cfg = loadConfig();
+  const set = new Set(Array.isArray(cfg.disabledClients) ? cfg.disabledClients : []);
+  for (const id of ids) { if (muted) set.add(id); else set.delete(id); }
+  cfg.disabledClients = [...set];
+  saveConfig(cfg);
+  log("·", "window", `${muted ? "muted" : "unmuted"} window ${String(req.params.sessionId).slice(0, 8)} (${ids.length} client(s))`);
+  res.json({ ok: true, muted, clientIds: ids });
 });
 
 // Force-reconnect a client: drop every connection carrying its tag — MCP
@@ -1343,6 +1385,10 @@ async function sendNotification(message: string, priority: "low" | "normal" | "h
   if (cfg.muteAll === true) {
     log("·", "notify", `suppressed — all notifications disabled (master mute), priority=${priority}`, client);
     return "Suppressed — all notifications are disabled (master mute is ON).";
+  }
+  if (client && Array.isArray(cfg.disabledClients) && cfg.disabledClients.includes(client)) {
+    log("·", "notify", `suppressed — client '${client}' is disabled, priority=${priority}`, client);
+    return `Suppressed — this client ('${client}') is disabled in BullseyeNotify.`;
   }
   const inTelegramConvo = Date.now() - lastTelegramInboundAt < TELEGRAM_CONVO_TTL_MS;
   const idleSecs = getOsIdleSeconds();
@@ -2770,10 +2816,11 @@ function createMcpServer(clientId: string, sessionTag?: string) {
     {},
     async () => {
       const cfg = loadConfig();
+      const clientDisabled = Array.isArray(cfg.disabledClients) && cfg.disabledClients.includes(clientId);
       const muted = cfg.muteAll === true;
-      const active = muted || isDndActive(cfg);
+      const active = muted || clientDisabled || isDndActive(cfg);
       let reason = "off";
-      if (muted) reason = "disabled";
+      if (clientDisabled || muted) reason = "disabled";
       else if (active) reason = cfg.dnd?.enabled ? "manual" : "schedule";
       return {
         content: [{ type: "text" as const, text: appendInbox(JSON.stringify({ active, reason }), sessionTag, clientId) }],

@@ -650,3 +650,95 @@ test("multi-destination arrays round-trip; slack botToken masks + survives re-sa
   assert.deepEqual(cfg.slack.channels, ["C333"], "channels should update on re-save");
   assert.equal(cfg.slack.botToken, masked, "botToken should be preserved (not blanked) on masked re-save");
 });
+
+// #57 — per-client disable: suppress in sendNotification, flag in /api/clients,
+// and get_dnd_status returns reason='disabled' for the targeted client.
+test("per-client disable suppresses notify + shows disabled in /api/clients + dnd_status returns disabled", async () => {
+  const tag = "pcdisabletest";
+  await initTaggedSession(tag);
+  const { clients } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const c = clients.find(x => x.tag === tag);
+  assert.ok(c, "client should be listed");
+  assert.equal(c.disabled, false, "should not be disabled initially");
+  const clientId = c.id;
+
+  // Disable the client
+  const disRes = await (await fetch(`http://localhost:${port}/api/clients/${encodeURIComponent(clientId)}/disable`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: true }),
+  })).json();
+  assert.equal(disRes.ok, true);
+  assert.equal(disRes.disabled, true);
+
+  // Verify /api/clients shows disabled
+  const { clients: clients2 } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const c2 = clients2.find(x => x.id === clientId);
+  assert.ok(c2, "client should still be listed");
+  assert.equal(c2.disabled, true, "should show disabled flag");
+
+  // Verify notify is suppressed for this client
+  const mcp = createHttpClient(port);
+  await mcp.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } }, { notify: false });
+  await mcp.rpc("notifications/initialized");
+  const notifyRes = await mcp.rpc("tools/call", { name: "notify", arguments: { message: "should be suppressed", priority: "high" } });
+  const text = notifyRes.body.result.content[0].text;
+  assert.match(text, /Suppressed.*disabled/, `notify should be suppressed for disabled client, got: ${text}`);
+
+  // Verify get_dnd_status returns disabled
+  const dndRes = await mcp.rpc("tools/call", { name: "get_dnd_status", arguments: {} });
+  const dnd = JSON.parse(dndRes.body.result.content[0].text.split("\n")[0]);
+  assert.equal(dnd.active, true, "dnd should be active for disabled client");
+  assert.equal(dnd.reason, "disabled", `dnd reason should be disabled, got: ${dnd.reason}`);
+
+  // Re-enable
+  await fetch(`http://localhost:${port}/api/clients/${encodeURIComponent(clientId)}/disable`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: false }),
+  });
+  const { clients: clients3 } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const c3 = clients3.find(x => x.id === clientId);
+  assert.equal(c3.disabled, false, "should be re-enabled");
+
+  // Verify notify passes after re-enable
+  const mcp2 = createHttpClient(port);
+  await mcp2.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+  await mcp2.rpc("notifications/initialized");
+  const notifyRes2 = await mcp2.rpc("tools/call", { name: "notify", arguments: { message: "should pass", priority: "normal" } });
+  const text2 = notifyRes2.body.result.content[0].text;
+  assert.doesNotMatch(text2, /Suppressed.*disabled/, `notify should NOT be suppressed after re-enable, got: ${text2}`);
+});
+
+// #57 — window mute: /api/window/:sessionId/mute round-trips disabledClients
+// and maps to the clients sharing that host session id.
+test("window mute endpoint toggles disabledClients for all clients of a session", async () => {
+  const hsid = "cccccccc-9999-8888-7777-666666666666";
+  const sessionId = encodeURIComponent(hsid);
+  // Open a session with this hsid to auto-register it in windowRegistry
+  await initTaggedSession("winmutetest", hsid);
+  // Register the window explicitly so clientIdsForHostSession resolves
+  await fetch(`http://localhost:${port}/api/window/register`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId: hsid, workspaceName: "TestWin", workspacePath: "/tmp/test" }),
+  });
+
+  // Initially not muted
+  const get1 = await (await fetch(`http://localhost:${port}/api/window/${sessionId}/mute`)).json();
+  assert.equal(get1.muted, false, "should not be muted initially");
+
+  // Mute
+  const post1 = await (await fetch(`http://localhost:${port}/api/window/${sessionId}/mute`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ muted: true }),
+  })).json();
+  assert.equal(post1.ok, true);
+
+  // Now muted
+  const get2 = await (await fetch(`http://localhost:${port}/api/window/${sessionId}/mute`)).json();
+  assert.equal(get2.muted, true, "should be muted after toggle");
+
+  // Unmute
+  const post2 = await (await fetch(`http://localhost:${port}/api/window/${sessionId}/mute`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ muted: false }),
+  })).json();
+  assert.equal(post2.ok, true);
+
+  const get3 = await (await fetch(`http://localhost:${port}/api/window/${sessionId}/mute`)).json();
+  assert.equal(get3.muted, false, "should be unmuted after toggle");
+});

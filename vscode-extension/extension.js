@@ -42,7 +42,8 @@ function activate(context) {
     vscode.commands.registerCommand("omniNotifyMcp.openInBrowser", openInBrowser),
     vscode.commands.registerCommand("omniNotifyMcp.startServer", () => ensureServer().then(() => provider && provider.refresh())),
     vscode.commands.registerCommand("omniNotifyMcp.openHelp", openHelp),
-    vscode.commands.registerCommand("omniNotifyMcp.configureClaude", () => configureClaudeMcp({ showResult: true }))
+    vscode.commands.registerCommand("omniNotifyMcp.configureClaude", () => configureClaudeMcp({ showResult: true })),
+    vscode.commands.registerCommand("omniNotifyMcp.muteWindow", muteWindow)
   );
 
   // Leverage both MCP + extension: the extension knows this window's real
@@ -146,6 +147,65 @@ function loadingHtml(port) {
 
 // ── Server lifecycle ───────────────────────────────────────────────────────
 
+async function muteWindow() {
+  await ensureServer();
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
+  if (!sessionId) {
+    vscode.window.showWarningMessage("No CLAUDE_CODE_SESSION_ID set — cannot mute this window.");
+    return;
+  }
+  const port = uiPort();
+  let currentMuted = false;
+  try {
+    const body = await httpGetText(`/api/window/${encodeURIComponent(sessionId)}/mute`);
+    currentMuted = (JSON.parse(body)).muted === true;
+  } catch { /* assume unmuted */ }
+  const action = currentMuted ? "unmute" : "mute";
+  const item = await vscode.window.showQuickPick(
+    [
+      { label: currentMuted ? "$(bell) Unmute this window" : "$(bell-slash) Mute this window", detail: currentMuted ? "Re-enable notifications from this VS Code window" : "Suppress all notifications from this VS Code window", picked: true },
+    ],
+    { placeHolder: currentMuted ? "This window is muted — unmute?" : "Mute this window?" }
+  );
+  if (!item) return;
+  const payload = JSON.stringify({ muted: !currentMuted });
+  try {
+    await httpPost(`/api/window/${encodeURIComponent(sessionId)}/mute`, payload);
+    refreshStatus();
+    vscode.window.showInformationMessage(currentMuted ? "Window unmuted." : "Window muted — notifications from this window suppressed.");
+  } catch (err) {
+    vscode.window.showErrorMessage(`Failed to ${action} window: ${err.message}`);
+  }
+}
+
+function httpGetText(path) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      { host: "127.0.0.1", port: uiPort(), path, timeout: 3000 },
+      (res) => {
+        let body = "";
+        res.on("data", (d) => { body += d; });
+        res.on("end", () => resolve(body));
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+  });
+}
+
+function httpPost(path, payload) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "127.0.0.1", port: uiPort(), path, method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } },
+      (res) => { let body = ""; res.on("data", (d) => { body += d; }); res.on("end", () => resolve(body)); }
+    );
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
 function uiPort() {
   return vscode.workspace.getConfiguration("omniNotifyMcp").get("uiPort") || 3737;
 }
@@ -225,6 +285,23 @@ function fetchMuted() {
   });
 }
 
+function fetchWindowMuted() {
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
+  if (!sessionId) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const req = http.get(
+      { host: "127.0.0.1", port: uiPort(), path: `/api/window/${encodeURIComponent(sessionId)}/mute`, timeout: 900 },
+      (res) => {
+        let body = "";
+        res.on("data", (d) => { body += d; });
+        res.on("end", () => { try { resolve(JSON.parse(body).muted === true); } catch { resolve(false); } });
+      }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+  });
+}
+
 async function refreshStatus() {
   if (!statusBarItem) return;
   const up = await pingUi();
@@ -235,12 +312,20 @@ async function refreshStatus() {
     statusBarItem.show();
     return;
   }
-  const muted = await fetchMuted();
-  statusBarItem.text = muted ? "$(bell-slash) Muted" : "$(bell) Notify";
-  statusBarItem.tooltip = muted
-    ? "All notifications are DISABLED (master mute is ON) — click to open panel"
-    : "Open BullseyeNotify config panel";
-  statusBarItem.backgroundColor = muted ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
+  const [globalMuted, winMuted] = await Promise.all([fetchMuted(), fetchWindowMuted()]);
+  if (globalMuted) {
+    statusBarItem.text = "$(bell-slash) Muted";
+    statusBarItem.tooltip = "ALL notifications are DISABLED (master mute is ON) — click to open panel";
+    statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+  } else if (winMuted) {
+    statusBarItem.text = "$(bell-slash) Win Muted";
+    statusBarItem.tooltip = "This window is muted — notifications from this window suppressed. Click to toggle.";
+    statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+  } else {
+    statusBarItem.text = "$(bell) Notify";
+    statusBarItem.tooltip = "Open BullseyeNotify config panel";
+    statusBarItem.backgroundColor = undefined;
+  }
   statusBarItem.show();
 }
 
