@@ -1262,6 +1262,7 @@ app.get("/api/clients", (_req, res) => {
       host: undefined,
       workspaceName: undefined,
       clientName: undefined,
+      disabled: false,
     });
   }
   clients.sort((a, b) => a.name.localeCompare(b.name) || a.panel - b.panel);

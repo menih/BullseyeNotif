@@ -79,9 +79,10 @@ function startServer(port) {
 
 // Minimal MCP-over-HTTP client. Returns parsed JSON-RPC response (or undefined
 // for notifications).
-function createHttpClient(port) {
+function createHttpClient(port, tag) {
   let sid;
   let nextId = 1;
+  const tagQs = tag ? `?tag=${encodeURIComponent(tag)}` : "";
   return {
     async rpc(method, params, { notify = false } = {}) {
       const isNotif = notify || method.startsWith("notifications/");
@@ -92,7 +93,8 @@ function createHttpClient(port) {
         "Accept": "application/json, text/event-stream",
       };
       if (sid) headers["mcp-session-id"] = sid;
-      const r = await fetch(`http://localhost:${port}/mcp`, {
+      const qs = (!sid && tagQs) ? tagQs : "";
+      const r = await fetch(`http://localhost:${port}/mcp${qs}`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -655,12 +657,18 @@ test("multi-destination arrays round-trip; slack botToken masks + survives re-sa
 // and get_dnd_status returns reason='disabled' for the targeted client.
 test("per-client disable suppresses notify + shows disabled in /api/clients + dnd_status returns disabled", async () => {
   const tag = "pcdisabletest";
-  await initTaggedSession(tag);
-  const { clients } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
-  const c = clients.find(x => x.tag === tag);
-  assert.ok(c, "client should be listed");
-  assert.equal(c.disabled, false, "should not be disabled initially");
-  const clientId = c.id;
+
+  // Open a tagged MCP session so we can find its clientId in /api/clients.
+  const mcp = createHttpClient(port, tag);
+  await mcp.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+  await mcp.rpc("notifications/initialized");
+
+  // Find our session's clientId
+  const { clients: c1 } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const client = c1.find(x => x.tag === tag);
+  assert.ok(client, `client ${tag} should be listed`);
+  assert.equal(client.disabled, false, "should not be disabled initially");
+  const clientId = client.id;
 
   // Disable the client
   const disRes = await (await fetch(`http://localhost:${port}/api/clients/${encodeURIComponent(clientId)}/disable`, {
@@ -670,22 +678,21 @@ test("per-client disable suppresses notify + shows disabled in /api/clients + dn
   assert.equal(disRes.disabled, true);
 
   // Verify /api/clients shows disabled
-  const { clients: clients2 } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
-  const c2 = clients2.find(x => x.id === clientId);
-  assert.ok(c2, "client should still be listed");
-  assert.equal(c2.disabled, true, "should show disabled flag");
+  const { clients: c2 } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const c2f = c2.find(x => x.id === clientId);
+  assert.ok(c2f, "client should still be listed");
+  assert.equal(c2f.disabled, true, "should show disabled flag");
 
-  // Verify notify is suppressed for this client
-  const mcp = createHttpClient(port);
-  await mcp.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } }, { notify: false });
-  await mcp.rpc("notifications/initialized");
+  // Verify notify is suppressed (same session = same clientId)
   const notifyRes = await mcp.rpc("tools/call", { name: "notify", arguments: { message: "should be suppressed", priority: "high" } });
   const text = notifyRes.body.result.content[0].text;
   assert.match(text, /Suppressed.*disabled/, `notify should be suppressed for disabled client, got: ${text}`);
 
   // Verify get_dnd_status returns disabled
   const dndRes = await mcp.rpc("tools/call", { name: "get_dnd_status", arguments: {} });
-  const dnd = JSON.parse(dndRes.body.result.content[0].text.split("\n")[0]);
+  const dndText = dndRes.body.result.content[0].text;
+  const dndLine = dndText.split("\n")[0];
+  const dnd = JSON.parse(dndLine);
   assert.equal(dnd.active, true, "dnd should be active for disabled client");
   assert.equal(dnd.reason, "disabled", `dnd reason should be disabled, got: ${dnd.reason}`);
 
@@ -693,11 +700,11 @@ test("per-client disable suppresses notify + shows disabled in /api/clients + dn
   await fetch(`http://localhost:${port}/api/clients/${encodeURIComponent(clientId)}/disable`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: false }),
   });
-  const { clients: clients3 } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
-  const c3 = clients3.find(x => x.id === clientId);
-  assert.equal(c3.disabled, false, "should be re-enabled");
+  const { clients: c3 } = await (await fetch(`http://localhost:${port}/api/clients`)).json();
+  const c3f = c3.find(x => x.id === clientId);
+  assert.equal(c3f.disabled, false, "should be re-enabled");
 
-  // Verify notify passes after re-enable
+  // New session: verify notify passes after re-enable
   const mcp2 = createHttpClient(port);
   await mcp2.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } });
   await mcp2.rpc("notifications/initialized");

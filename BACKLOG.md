@@ -12,7 +12,6 @@
 
 | Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
 |---|---|---|---|---|---|
-| 🔕 Quiet control | 🟠 P1 | [#57](#57-per-client-disable-server--client-side--m--p1) (M) | — | 🚧 Meni: confirm client-side scope | Per-client disable: toggle a single client off (server UI + the client honors it). |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -24,25 +23,27 @@ _(empty — only Meni places rows here)_
 
 ## 📋 OPEN BACKLOG
 
----
-
-### #57 PER-CLIENT DISABLE (server + client side) · M · P1
-
-**Ask (Meni 2026-06-25).** "When user turn on DND, do we ask clients to stop sending? There has to be a way we can disable individual clients, both from server and client perspective."
-
-**Current reality (verified).** No server→client push. Pull-based only: agents poll `get_dnd_status`/`get_idle_seconds` and self-censor; server suppresses at delivery (DND for <high; muteAll for all). No per-client enable/disable exists — `muteAll` is global. Clients ARE tracked per window (`sessions[sid] = {clientId, tag, hostSessionId}`; [/api/clients](ui/server.ts#L1181)), and `sendNotification(msg, prio, clientId)` already receives the originating client → per-client suppression is feasible.
-
-**Design (grounded in the code).** Mirror the existing `clientAliases` rename pattern ([ui/server.ts](ui/server.ts#L1270)): a per-client `disabledClients` set in config keyed by clientId/tag. (a) Suppress in `sendNotification` when the originating client is disabled. (b) `get_dnd_status` returns `disabled` for that specific client so its agent stops. (c) Toggle in the Clients panel (server side). (d) Optional: a self-mute control in the client's own extension panel (client side).
-
-**Pending Meni decision (options-prompt):** scope of "client perspective" — agent-honors-disable + server backstop, vs ALSO a per-window self-mute in the extension. Build follows the answer.
-
----
-
 _(empty — all stories shipped)_
 
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-25 14:35 — #57 per-client disable (server + UI + extension)
+
+**Ask (Meni 2026-06-25).** "When user turn on DND, do we ask clients to stop sending? There has to be a way we can disable individual clients, both from server and client perspective."
+
+**Shipped — full per-client disable flow (server + UI + extension).**
+
+- **Server** ([ui/server.ts](ui/server.ts)): `disabledClients: string[]` in `defaultConfig()` keyed by clientId; `sendNotification` suppresses at the chokepoint when client is in the set; `get_dnd_status` returns `{active:true, reason:'disabled'}` for disabled clients so agents stop sending; `/api/clients` includes `disabled: boolean` per client row; `POST /api/clients/:id/disable {disabled}` toggles; `GET/POST /api/window/:sessionId/mute` mirrors all clients of a host session into disabledClients.
+- **UI** ([ui/public/app.js](ui/public/app.js)): `toggleClientDisabled(id, currentlyDisabled)` added — toggles via `/api/clients/:id/disable` endpoint; per-client Disable/Enable button in the Clients panel with `client-kind-off` chip when disabled.
+- **Extension** ([vscode-extension/extension.js](vscode-extension/extension.js) + [package.json](vscode-extension/package.json)): new `omniNotifyMcp.muteWindow` command registered ("🔕 Mute / unmute this window") that calls `/api/window/<sessionId>/mute`; `fetchWindowMuted()` added; `refreshStatus` now shows `$(bell-slash) Win Muted` with warning background when this window is muted (global mute still takes precedence).
+
+**Verify (verified).** `npm run build` EXIT 0; `node --test` → **24/24** (2 new tests): #23 per-client disable round-trips suppress→dnd_status→re-enable→pass; #24 window-mute endpoint toggles disabledClients for all clients of a session. `node --check` on extension.js + app.js clean.
+
+**Operator-verify (irreducible — needs live server restart + extension reload).** The new code is in `dist/` but your live server on :3737 runs the old build. To activate: restart the notify server (`./restart.sh`, or reload windows) → open the Clients tab → each client has a Disable/Enable button → disabling a client suppresses its notifies at the server AND its agent's `get_dnd_status` reports disabled. Extension: Reload Window → `Ctrl+Shift+P` → "BullseyeNotify: Mute / unmute this window" → status bar shows "Win Muted" when toggled.
 
 ---
 
