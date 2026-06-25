@@ -52,10 +52,10 @@ validate_npm() {
 validate_vsce() {
   local token="$1"
   if [ -n "$token" ]; then
-    vsce verify-pat MeniHillel --pat "$token" >/dev/null 2>&1
+    vsce verify-pat Karish911 --pat "$token" >/dev/null 2>&1
   else
     # No token — check if vsce login is cached and works
-    vsce verify-pat MeniHillel >/dev/null 2>&1
+    vsce verify-pat Karish911 >/dev/null 2>&1
   fi
 }
 
@@ -169,7 +169,7 @@ if [ $VSCE_OK -eq 0 ]; then
   echo ""
   echo "  Two ways to authenticate vsce:"
   echo "    A. Cache login locally (no token in our file):"
-  echo "         vsce login MeniHillel"
+  echo "         vsce login Karish911"
   echo "       Recommended — token stays in OS keychain."
   echo ""
   echo "    B. Paste a PAT here and we'll save it to the secrets file."
@@ -185,7 +185,7 @@ if [ $VSCE_OK -eq 0 ]; then
   read -rsp "  Paste marketplace PAT (input hidden, Enter to skip): " NEW_VSCE
   echo ""
   if [ -z "$NEW_VSCE" ]; then
-    echo "  ⊘ Skipped — make sure 'vsce login MeniHillel' is set up separately."
+    echo "  ⊘ Skipped — make sure 'vsce login Karish911' is set up separately."
     SKIP_VSCE_SAVE=1
   else
     echo -n "  Validating... "
@@ -230,7 +230,7 @@ hr
 echo ""
 [ -n "$FINAL_NPM" ]  && echo "  npm:         saved + validated"  || echo "  npm:         (not set — release will fail)"
 [ -n "$FINAL_VSCE" ] && echo "  marketplace: PAT saved + validated"
-[ -z "$FINAL_VSCE" ] && [ $VSCE_OK -eq 0 ] && echo "  marketplace: relying on 'vsce login MeniHillel' (verify it's set up)"
+[ -z "$FINAL_VSCE" ] && [ $VSCE_OK -eq 0 ] && echo "  marketplace: relying on 'vsce login Karish911' (verify it's set up)"
 echo ""
 echo "  Now ship: bash ./release.sh"
 echo ""

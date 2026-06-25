@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/omni-notify-mcp"><img src="https://img.shields.io/npm/v/omni-notify-mcp.svg" alt="npm"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=MeniHillel.omni-notify-mcp"><img src="https://img.shields.io/visual-studio-marketplace/v/MeniHillel.omni-notify-mcp?label=marketplace" alt="VS Code Marketplace"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=Karish911.omni-notify-mcp"><img src="https://img.shields.io/visual-studio-marketplace/v/Karish911.omni-notify-mcp?label=marketplace" alt="VS Code Marketplace"></a>
   <img src="https://img.shields.io/badge/license-MIT-4ea3ff.svg" alt="MIT license">
   <img src="https://img.shields.io/badge/MCP-compatible-4ea3ff.svg" alt="MCP compatible">
 </p>

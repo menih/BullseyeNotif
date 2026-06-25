@@ -10,7 +10,9 @@
 
 ### 🎯 OUTSTANDING
 
-_(empty — all stories shipped)_
+| Theme / Epic | Pri | Story (effort) | % | Blocker | Headline |
+|---|---|---|---|---|---|
+| 🔕 Quiet control | 🟠 P1 | [#56](#56-global-disable-all-clients--kill-switch--dnd-not-suppressing--m--p1) (M) | — | | DND on but clients still active; need a master disable-all that the extension reflects. |
 
 ### 🔄 ONGOING
 _(empty — only Meni places rows here)_
@@ -24,11 +26,43 @@ _(empty — only Meni places rows here)_
 
 ---
 
+### #56 GLOBAL DISABLE-ALL-CLIENTS / KILL-SWITCH + DND NOT SUPPRESSING · M · P1
+
+**Ask (Meni 2026-06-25, angry).** "There has to be a way to disable all clients!!! and notify the extension to disable everything!!! I turned on DND but shit keeps on happening on clients."
+
+**Two parts.**
+1. **Bug:** DND is ON but notifications/activity still reach clients → DND gating is leaky or not applied to every send path. Need to repro: which path bypasses the DND check (notify vs ask vs per-client vs test sends).
+2. **Feature:** a master **disable-all** switch (kill switch) that hard-silences EVERY client + channel, and is pushed to the extension panel so it visibly reflects the off state.
+
+**Investigate:** DND/idle gating in [ui/server.ts](ui/server.ts) + the MCP `notify`/`ask` paths ([src/](src/)); where `get_dnd_status` is consulted vs ignored; whether per-client enable state exists. **Acceptance:** with disable-all on, no notification of any kind is delivered on any channel/client, and the panel shows it.
+
+---
+
 _(empty — all stories shipped)_
 
 ---
 
 ## 📦 DONE — newest first
+
+---
+
+### 2026-06-25 16:07 — #55 remove Meni's name from the extension identity (re-ID under Karish911)
+
+**Ask (Meni 2026-06-25, angry).** "Remove my name from extension." Marketplace showed title `Omni Notify MCP (MeniHillel 1.3.11)` + URL `itemName=MeniHillel.omni-notify-mcp-menihillel`. Meni picked **Re-ID under Karish911** (the handle already shown as author).
+
+**Root cause of the title name** ([release.sh](release.sh#L242-L246)): on a marketplace "display name is taken" collision the script appends `(${EXT_PUBLISHER} ${VERSION})` to the displayName → that's what stamped `(MeniHillel 1.3.11)`. `EXT_PUBLISHER` is read from `package.json` publisher, so flipping the publisher fixes the fallback too (now `(Karish911 …)`, a handle not a real name).
+
+**Scrubbed** — every `MeniHillel`/`menihillel` in the extension identity + publish tooling:
+- [vscode-extension/package.json](vscode-extension/package.json): `name` `omni-notify-mcp-menihillel`→`omni-notify-mcp`; `publisher` `MeniHillel`→`Karish911`. New ID `Karish911.omni-notify-mcp`; `displayName` already clean.
+- [release.sh](release.sh): `MARKETPLACE_ITEM`→`Karish911.omni-notify-mcp`; `vsce login` comment.
+- [setup-secrets.sh](setup-secrets.sh): all `vsce verify-pat`/`vsce login MeniHillel`→`Karish911` (×5).
+- [README.md](README.md): marketplace badge + link `itemName`→`Karish911.omni-notify-mcp`.
+
+**Left intentionally:** `menihillel@gmail.com` in [notify-secrets.json](notify-secrets.json) — that's Meni's own email *recipient/SMTP* config (where notifs are sent), not the extension's public name; removing it breaks his email delivery.
+
+**Verify.** `node -p` on the extension package.json → `Karish911.omni-notify-mcp | display: BullseyeNotify (Omni Notify MCP)` (parses, name gone from ID + title). Repo grep: no `MeniHillel`/`menihillel` left outside the email config + this backlog.
+
+**Operator-verify (irreducible — outward + needs your marketplace account):** the live marketplace page only changes after a republish under the new publisher. Steps: (1) create/confirm a `Karish911` publisher on the VS Code Marketplace (Azure DevOps) and `vsce login Karish911`; (2) from `vscode-extension/` run `bash release.sh` (publishes `Karish911.omni-notify-mcp`); (3) **unpublish the old `MeniHillel.omni-notify-mcp-menihillel` listing** so your name disappears from the marketplace entirely. I did NOT publish — that's your account + an outward action.
 
 ---
 

@@ -20,7 +20,7 @@ EXT_DIR="$NPM_DIR/vscode-extension"
 SECRETS_FILE="$HOME/.notify-mcp-secrets"
 REPO_SECRETS_FILE="$NPM_DIR/notify-secrets.json"
 PACKAGE_NAME="omni-notify-mcp"
-MARKETPLACE_ITEM="MeniHillel.omni-notify-mcp"
+MARKETPLACE_ITEM="Karish911.omni-notify-mcp"
 
 decode_repo_secret() {
   local field="$1"
@@ -122,7 +122,7 @@ fi
 
 npm_preflight_or_die
 
-# VSCE_PAT is optional — vsce login MeniHillel caches the credential, so
+# VSCE_PAT is optional — vsce login Karish911 caches the credential, so
 # `vsce publish` works without --pat once you've logged in.
 
 cd "$NPM_DIR"
