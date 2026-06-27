@@ -20,7 +20,7 @@ EXT_DIR="$NPM_DIR/vscode-extension"
 SECRETS_FILE="$HOME/.notify-mcp-secrets"
 REPO_SECRETS_FILE="$NPM_DIR/notify-secrets.json"
 PACKAGE_NAME="omni-notify-mcp"
-MARKETPLACE_ITEM="Karish911.omni-notify-mcp"
+MARKETPLACE_ITEM="Karish911.bullseye-notify"
 
 decode_repo_secret() {
   local field="$1"
