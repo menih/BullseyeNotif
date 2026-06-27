@@ -86,7 +86,7 @@ Older DONE entries moved from [BACKLOG.md](BACKLOG.md) per §2 — DONE keeps on
 
 ### 2026-06-08 13:12 — published omni-notify-mcp@1.3.12 (ships the naming fix)
 
-**Published** (Meni: *"publish it"*) via `release.sh` (patch bump 1.3.11→1.3.12): npm `omni-notify-mcp@1.3.12` + marketplace `MeniHillel.omni-notify-mcp-menihillel@1.3.12`, both OK. This carries the #25 bridge `deriveVscId` fix to the published `npx -y omni-notify-mcp` bridge (picked up on its next launch). **Note:** version files (`package.json`, `vscode-extension/package.json`) are bumped + uncommitted — Meni commits.
+**Published** (Meni: *"publish it"*) via `release.sh` (patch bump 1.3.11→1.3.12): npm `omni-notify-mcp@1.3.12` + marketplace `Karish911.omni-notify-mcp@1.3.12`, both OK. This carries the #25 bridge `deriveVscId` fix to the published `npx -y omni-notify-mcp` bridge (picked up on its next launch). **Note:** version files (`package.json`, `vscode-extension/package.json`) are bumped + uncommitted — Meni commits.
 
 ---
 

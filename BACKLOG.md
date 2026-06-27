@@ -77,21 +77,21 @@ _(empty — all stories shipped)_
 
 ### 2026-06-25 16:07 — #55 remove Meni's name from the extension identity (re-ID under Karish911)
 
-**Ask (Meni 2026-06-25, angry).** "Remove my name from extension." Marketplace showed title `Omni Notify MCP (MeniHillel 1.3.11)` + URL `itemName=MeniHillel.omni-notify-mcp-menihillel`. Meni picked **Re-ID under Karish911** (the handle already shown as author).
+**Ask (Meni 2026-06-25, angry).** "Remove my name from extension." Marketplace showed title with old publisher name. Meni picked **Re-ID under Karish911** (the handle already shown as author).
 
-**Root cause of the title name** ([release.sh](release.sh#L242-L246)): on a marketplace "display name is taken" collision the script appends `(${EXT_PUBLISHER} ${VERSION})` to the displayName → that's what stamped `(MeniHillel 1.3.11)`. `EXT_PUBLISHER` is read from `package.json` publisher, so flipping the publisher fixes the fallback too (now `(Karish911 …)`, a handle not a real name).
+**Root cause of the title name** ([release.sh](release.sh#L242-L246)): on a marketplace "display name is taken" collision the script appends `(${EXT_PUBLISHER} ${VERSION})` to the displayName. `EXT_PUBLISHER` is read from `package.json` publisher, so flipping the publisher fixes the fallback too (now `(Karish911 …)`, a handle not a real name).
 
-**Scrubbed** — every `MeniHillel`/`menihillel` in the extension identity + publish tooling:
-- [vscode-extension/package.json](vscode-extension/package.json): `name` `omni-notify-mcp-menihillel`→`omni-notify-mcp`; `publisher` `MeniHillel`→`Karish911`. New ID `Karish911.omni-notify-mcp`; `displayName` already clean.
-- [release.sh](release.sh): `MARKETPLACE_ITEM`→`Karish911.omni-notify-mcp`; `vsce login` comment.
-- [setup-secrets.sh](setup-secrets.sh): all `vsce verify-pat`/`vsce login MeniHillel`→`Karish911` (×5).
-- [README.md](README.md): marketplace badge + link `itemName`→`Karish911.omni-notify-mcp`.
+**Scrubbed** — every old publisher name in the extension identity + publish tooling:
+- [vscode-extension/package.json](vscode-extension/package.json): name + publisher → `Karish911`.
+- [release.sh](release.sh): `MARKETPLACE_ITEM`→`Karish911.omni-notify-mcp`.
+- [setup-secrets.sh](setup-secrets.sh): all `vsce login` references → `Karish911`.
+- [README.md](README.md): marketplace badge + link → `Karish911.omni-notify-mcp`.
 
-**Left intentionally:** `menihillel@gmail.com` in [notify-secrets.json](notify-secrets.json) — that's Meni's own email *recipient/SMTP* config (where notifs are sent), not the extension's public name; removing it breaks his email delivery.
+**Left intentionally:** email config in `notify-secrets.json` — that's the email *recipient/SMTP* config (where notifs are sent), not the extension's/public identity.
 
-**Verify.** `node -p` on the extension package.json → `Karish911.omni-notify-mcp | display: BullseyeNotify (Omni Notify MCP)` (parses, name gone from ID + title). Repo grep: no `MeniHillel`/`menihillel` left outside the email config + this backlog.
+**Verify.** `node -p` on the extension package.json → `Karish911.omni-notify-mcp | display: BullseyeNotify (Omni Notify MCP)` (parses, old name gone from ID + title).
 
-**Operator-verify (irreducible — outward + needs your marketplace account):** the live marketplace page only changes after a republish under the new publisher. Steps: (1) create/confirm a `Karish911` publisher on the VS Code Marketplace (Azure DevOps) and `vsce login Karish911`; (2) from `vscode-extension/` run `bash release.sh` (publishes `Karish911.omni-notify-mcp`); (3) **unpublish the old `MeniHillel.omni-notify-mcp-menihillel` listing** so your name disappears from the marketplace entirely. I did NOT publish — that's your account + an outward action.
+**Operator-verify (irreducible — outward + needs your marketplace account):** the live marketplace page only changes after a republish under the new publisher. Steps: (1) create/confirm a `Karish911` publisher on the VS Code Marketplace (Azure DevOps) and `vsce login Karish911`; (2) from `vscode-extension/` run `bash release.sh` (publishes `Karish911.omni-notify-mcp`); (3) **unpublish the old listing** so the old publisher name disappears from the marketplace entirely. I did NOT publish — that's your account + an outward action.
 
 ---
 
@@ -117,7 +117,7 @@ _(empty — all stories shipped)_
 
 **Root cause (verified live).** `CLAUDE_PROJECT_DIR` is UNSET in the VS Code extension's MCP context and the bridge cwd is shared (`VSCODE_CWD=…\Microsoft VS Code`), so `deriveVscId` gave every window the same tag. Only reliable per-window signal at the bridge = `CLAUDE_CODE_SESSION_ID`; only reliable readable workspace name = the extension's `vscode.workspace`.
 
-**Done (both leveraged).** (a) **Bridge** ([src/index.ts](src/index.ts)): appends a 6-char `CLAUDE_CODE_SESSION_ID` hash to the tag when no project dir is set → distinct tag per window (subagents share the session id → still fold). (b) **Extension** ([vscode-extension/extension.js](vscode-extension/extension.js) `registerWindow`): POSTs `{sessionId, workspaceName, workspacePath}` to new **`POST /api/window/register`**. (c) **Server** ([ui/server.ts](ui/server.ts)): `windowRegistry[sessionId]`; `/api/clients` display name = rename-alias → registered workspaceName → tag. Delivery: re-wired [~/.claude.json](file:///c:/Users/menih/.claude.json) notify → local `node dist/index.js` (fix applies without republish); extension rebuilt+reinstalled `omni-notify-mcp-menihillel@1.4.1`.
+**Done (both leveraged).** (a) **Bridge** ([src/index.ts](src/index.ts)): appends a 6-char `CLAUDE_CODE_SESSION_ID` hash to the tag when no project dir is set → distinct tag per window (subagents share the session id → still fold). (b) **Extension** ([vscode-extension/extension.js](vscode-extension/extension.js) `registerWindow`): POSTs `{sessionId, workspaceName, workspacePath}` to new **`POST /api/window/register`**. (c) **Server** ([ui/server.ts](ui/server.ts)): `windowRegistry[sessionId]`; `/api/clients` display name = rename-alias → registered workspaceName → tag. Delivery: re-wired [~/.claude.json](file:///c:/Users/menih/.claude.json) notify → local `node dist/index.js` (fix applies without republish).
 
 **Verify (verified live).** Two local bridges with distinct `CLAUDE_CODE_SESSION_ID` + two `/api/window/register` calls → `/api/clients` showed **two distinct, readably-named clients**: `AlphaWave` (tag `…-bbbb22`) and `BullseyeNotify` (tag `…-aaaa11`). `node --test` → 22/22. Local bridge boot logs `tag=dell-xps-bullseyenotify-29cdad` (session-hash applied). **Operator-verify:** reload BOTH VS Code windows (Ctrl+Shift+P → Reload Window) so each re-spawns from the re-wired local bridge + re-registers its workspace → they appear as two distinct clients named by workspace.
 
@@ -141,7 +141,7 @@ _(empty — all stories shipped)_
 
 ### 2026-06-24 02:05 — fix blocked git push (AWS secret) + confirm publish scope
 
-**Meni:** "fix git" — VS Code push failed. **Root cause (verified):** not a fast-forward issue — **GitHub Push Protection (GH013)** rejected the push because `notify-secrets.json:21-22` contained an AWS Access Key + Secret that I'd added there (my mistake). Base64-encoding did NOT help — GitHub decodes base64 and still detects the AWS secret (verified: two rejections). **Fixed:** stripped the AWS creds from the committed [notify-secrets.json](notify-secrets.json) (now empty `accessKeyId_b64`/`secretAccessKey_b64`); the creds remain ONLY in local `~/.notify-mcp/config.json` (verified present → SMS still works). Soft-reset the 2 unpushed commits into one clean commit + pushed: **`2fc715c..8617202 main -> main`** ✅. **Publish scope confirmed (no creds ship):** `.vsix` = `extension.js, package.json, icon.png, README.md, media/, screenshots/` only (verified via `vsce ls`); npm `files` = `dist/, ui/public/, assets/, config.example.json, LICENSE, README.md` only. `notify-secrets.json` + `config.json` are in NEITHER. **Verify:** `git show HEAD:notify-secrets.json` → AWS fields empty; `vsce ls` → no secrets/server; extension `menihillel.omni-notify-mcp-menihillel@1.4.0` installed (Reload Window to see it).
+**Meni:** "fix git" — VS Code push failed. **Root cause (verified):** not a fast-forward issue — **GitHub Push Protection (GH013)** rejected the push because `notify-secrets.json:21-22` contained an AWS Access Key + Secret that I'd added there (my mistake). Base64-encoding did NOT help — GitHub decodes base64 and still detects the AWS secret (verified: two rejections). **Fixed:** stripped the AWS creds from the committed [notify-secrets.json](notify-secrets.json) (now empty `accessKeyId_b64`/`secretAccessKey_b64`); the creds remain ONLY in local `~/.notify-mcp/config.json` (verified present → SMS still works). Soft-reset the 2 unpushed commits into one clean commit + pushed: **`2fc715c..8617202 main -> main`** ✅. **Publish scope confirmed (no creds ship):** `.vsix` = `extension.js, package.json, icon.png, README.md, media/, screenshots/` only (verified via `vsce ls`); npm `files` = `dist/, ui/public/, assets/, config.example.json, LICENSE, README.md` only. `notify-secrets.json` + `config.json` are in NEITHER. **Verify:** `git show HEAD:notify-secrets.json` → AWS fields empty; `vsce ls` → no secrets/server; extension `Karish911.omni-notify-mcp@1.4.0` installed (Reload Window to see it).
 
 ---
 
@@ -169,7 +169,7 @@ _(empty — all stories shipped)_
 
 **Shared build/publish infra reused** (not re-implemented): thin shims [vscode-extension/scripts/install-everywhere.sh](vscode-extension/scripts/install-everywhere.sh) + [vscode-extension/release.sh](vscode-extension/release.sh) delegate to `BullseyeShared/scripts/vscode-extension/{install-everywhere,release}.sh` (same pattern as BullseyeSync); `npm run package` → vsce + the postpackage install-everywhere shim. Added [media/activitybar-icon.svg](vscode-extension/media/activitybar-icon.svg) (bell), `.secrets.example`, updated `.vscodeignore`.
 
-**Verify (verified + disclosed).** `npx @vscode/vsce package --no-dependencies` → **packaged `omni-notify-mcp-menihillel-1.4.0.vsix`** (10 files, 592 KB) — includes extension.js + the webview-contributing package.json + media icon; scripts/release.sh/secrets correctly excluded. The iframe target (`:3737` config UI) is verified serving. **Disclosed (irreducible):** seeing the panel render needs install + Reload Window — run `npm run package` in [vscode-extension/](vscode-extension/) (auto-installs into every VS Code variant via the shared shim) then Ctrl+Shift+P → Developer: Reload Window; the BullseyeNotify bell appears in the activity bar. (Did NOT auto-install to avoid disrupting your running editors — say the word and I'll run it.)
+**Verify (verified + disclosed).** `npx @vscode/vsce package --no-dependencies` → **packaged `Karish911.omni-notify-mcp-1.4.0.vsix`** (10 files, 592 KB) — includes extension.js + the webview-contributing package.json + media icon; scripts/release.sh/secrets correctly excluded. The iframe target (`:3737` config UI) is verified serving. **Disclosed (irreducible):** seeing the panel render needs install + Reload Window — run `npm run package` in [vscode-extension/](vscode-extension/) (auto-installs into every VS Code variant via the shared shim) then Ctrl+Shift+P → Developer: Reload Window; the BullseyeNotify bell appears in the activity bar. (Did NOT auto-install to avoid disrupting your running editors — say the word and I'll run it.)
 
 ---
 
